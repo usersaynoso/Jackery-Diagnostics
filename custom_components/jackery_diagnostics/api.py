@@ -137,13 +137,27 @@ def _extract_devices(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _device_value(device: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in device and device[key] not in (None, ""):
+            return device[key]
+    return None
+
+
 def _device_name(device: dict[str, Any]) -> str:
     return str(
-        device.get("deviceName")
-        or device.get("name")
-        or device.get("alias")
-        or device.get("deviceSn")
-        or device.get("id")
+        _device_value(
+            device,
+            "deviceName",
+            "devName",
+            "devNickname",
+            "name",
+            "alias",
+            "deviceSn",
+            "devSn",
+            "id",
+            "devId",
+        )
         or "Unknown device"
     )
 
@@ -167,7 +181,27 @@ def format_probe_notification(results: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     if not results.get("devices"):
+        discovery = results.get("discovery", {})
         lines.extend(("", "No devices were discovered for this account."))
+        if discovery:
+            lines.append(f"Discovery HTTP status: {discovery.get('http_status')}")
+            lines.append(
+                f"Discovery rows returned: {discovery.get('raw_device_count', 0)}"
+            )
+            if discovery.get("skipped_devices"):
+                lines.append(
+                    f"Skipped device rows: {len(discovery['skipped_devices'])}"
+                )
+                for skipped in discovery["skipped_devices"][:3]:
+                    lines.append(
+                        "  Skipped row keys: "
+                        + ", ".join(sorted(skipped.get("keys", [])))
+                    )
+            if discovery.get("body"):
+                lines.append(
+                    f"Discovery response: "
+                    f"{_truncate_notification_body(discovery['body'])}"
+                )
         return "\n".join(lines)
 
     for device in results["devices"]:
@@ -251,6 +285,10 @@ class JackeryDiagnosticsClient:
 
     def discover_devices(self) -> list[dict[str, Any]]:
         """Return the list of bound devices."""
+        return self.discover_device_details()["devices"]
+
+    def discover_device_details(self) -> dict[str, Any]:
+        """Return parsed devices together with raw discovery metadata."""
         response = self._get(DEVICE_LIST_ENDPOINT, {})
         payload = _parse_json(response.text) or {}
         if response.status_code >= 400:
@@ -263,11 +301,20 @@ class JackeryDiagnosticsClient:
                 f"Device discovery failed: {payload.get('msg', 'Unknown error')}"
             )
 
+        raw_devices = _extract_devices(payload)
         devices: list[dict[str, Any]] = []
-        for device in _extract_devices(payload):
-            device_id = device.get("id")
-            device_sn = device.get("deviceSn")
+        skipped_devices: list[dict[str, Any]] = []
+        for index, device in enumerate(raw_devices):
+            device_id = _device_value(device, "id", "devId", "deviceId")
+            device_sn = _device_value(device, "deviceSn", "devSn", "sn")
             if device_id is None or not device_sn:
+                skipped_devices.append(
+                    {
+                        "index": index,
+                        "keys": list(device.keys()),
+                        "raw": device,
+                    }
+                )
                 continue
             devices.append(
                 {
@@ -277,7 +324,13 @@ class JackeryDiagnosticsClient:
                     "raw": device,
                 }
             )
-        return devices
+        return {
+            "devices": devices,
+            "http_status": response.status_code,
+            "body": response.text,
+            "raw_device_count": len(raw_devices),
+            "skipped_devices": skipped_devices,
+        }
 
     def _probe_single(
         self,
@@ -352,7 +405,8 @@ class JackeryDiagnosticsClient:
         """Run discovery and endpoint probing for all devices."""
         generated_at = datetime.now(timezone.utc).isoformat()
         try:
-            devices = self.discover_devices()
+            discovery = self.discover_device_details()
+            devices = discovery["devices"]
         except JackeryDiagnosticsError as err:
             _LOGGER.error("Diagnostic probe failed before endpoint scan: %s", err)
             return {
@@ -360,6 +414,7 @@ class JackeryDiagnosticsClient:
                 "account": self._email,
                 "token": self._token,
                 "devices": [],
+                "discovery": {},
                 "fatal_error": str(err),
             }
 
@@ -391,6 +446,7 @@ class JackeryDiagnosticsClient:
             "account": self._email,
             "token": self._token,
             "devices": device_results,
+            "discovery": discovery,
             "fatal_error": None,
         }
 

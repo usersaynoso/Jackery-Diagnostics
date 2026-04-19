@@ -122,6 +122,32 @@ class LoginAndProbeTests(unittest.TestCase):
 
     @patch("custom_components.jackery_diagnostics.api.requests.get")
     @patch("custom_components.jackery_diagnostics.api.requests.post")
+    def test_run_probe_accepts_jackery_app_device_keys(
+        self, mock_post: Mock, mock_get: Mock
+    ) -> None:
+        mock_post.return_value = Mock(status_code=200, text='{"code":0,"token":"abc"}')
+        mock_get.side_effect = [
+            Mock(
+                status_code=200,
+                text=(
+                    '{"code":0,"data":[{"devId":456,"devSn":"DEV456",'
+                    '"devName":"Explorer 2000 Plus"}]}'
+                ),
+            ),
+            *[
+                Mock(status_code=404, text='{"code":404,"msg":"not found"}')
+                for _ in range(len(PROBE_ENDPOINTS) * 2)
+            ],
+        ]
+
+        result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
+
+        self.assertEqual(result["devices"][0]["id"], 456)
+        self.assertEqual(result["devices"][0]["device_sn"], "DEV456")
+        self.assertEqual(result["devices"][0]["name"], "Explorer 2000 Plus")
+
+    @patch("custom_components.jackery_diagnostics.api.requests.get")
+    @patch("custom_components.jackery_diagnostics.api.requests.post")
     def test_run_probe_records_request_errors_without_crashing(
         self, mock_post: Mock, mock_get: Mock
     ) -> None:
@@ -154,6 +180,7 @@ class LoginAndProbeTests(unittest.TestCase):
             {
                 "generated_at": "2026-04-20T10:00:00+00:00",
                 "fatal_error": None,
+                "discovery": {},
                 "devices": [
                     {
                         "name": "Explorer 1000",
@@ -176,6 +203,28 @@ class LoginAndProbeTests(unittest.TestCase):
 
         self.assertIn("INTERESTING /v1/device/workingMode", notification)
         self.assertIn("Explorer 1000", notification)
+
+    def test_notification_includes_discovery_diagnostics_when_no_devices(self) -> None:
+        notification = format_probe_notification(
+            {
+                "generated_at": "2026-04-20T10:00:00+00:00",
+                "fatal_error": None,
+                "devices": [],
+                "discovery": {
+                    "http_status": 200,
+                    "body": '{"code":0,"data":[{"foo":"bar"}]}',
+                    "raw_device_count": 1,
+                    "skipped_devices": [
+                        {"keys": ["foo"], "raw": {"foo": "bar"}, "index": 0}
+                    ],
+                },
+            }
+        )
+
+        self.assertIn("No devices were discovered for this account.", notification)
+        self.assertIn("Discovery HTTP status: 200", notification)
+        self.assertIn("Skipped device rows: 1", notification)
+        self.assertIn("Discovery response:", notification)
 
 
 if __name__ == "__main__":

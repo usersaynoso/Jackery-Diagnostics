@@ -91,6 +91,7 @@ def _install_common_stubs(stubbed_modules: dict[str, object]) -> None:
             "account": email,
             "token": "fresh-token",
             "fatal_error": None,
+            "discovery": {},
             "devices": [],
         }
 

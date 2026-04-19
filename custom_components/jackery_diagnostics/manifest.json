@@ -1,0 +1,17 @@
+{
+  "domain": "jackery_diagnostics",
+  "name": "Jackery Diagnostics",
+  "version": "1.0.0",
+  "documentation": "https://github.com/usersaynoso/Jackery-Diagnostics/blob/main/README.md",
+  "issue_tracker": "https://github.com/usersaynoso/Jackery-Diagnostics/issues",
+  "codeowners": [
+    "@usersaynoso"
+  ],
+  "dependencies": [],
+  "requirements": [
+    "pycryptodomex>=3.9.0"
+  ],
+  "config_flow": true,
+  "integration_type": "service",
+  "iot_class": "cloud_polling"
+}

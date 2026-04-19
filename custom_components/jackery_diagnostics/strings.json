@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Jackery Diagnostics",
+        "description": "This diagnostic tool signs in to the Jackery cloud, probes undocumented endpoints, and creates a Home Assistant notification with the results. Your credentials are used only to authenticate and run the probe.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Could not sign in with those credentials.",
+      "cannot_connect": "Could not connect to the Jackery cloud.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This Jackery account is already configured."
+    }
+  }
+}

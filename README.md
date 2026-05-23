@@ -44,7 +44,7 @@ The credentials are used only to authenticate with the Jackery cloud and run the
 
 - Persistent notification in Home Assistant with readable per-endpoint results
 - Full untruncated JSON output at `/config/jackery_diagnostics_results.json`
-- Home Assistant `Download diagnostics` support from the integration's three-dot menu
+- Home Assistant `Download diagnostics` support from the integration's three-dot menu. The downloaded file is scoped to Jackery charging-plan evidence only; it does not include a Home Assistant environment dump or a list of other installed custom integrations.
 - `property_snapshots` per device for before/after comparisons
 - `previous_result_diff` after the second and later runs
 - `socketry_protocol_catalog` with known writable property IDs, action IDs, value labels, and MQTT command payload shape

@@ -149,13 +149,47 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "account": "dev@example.com",
                         "token": "token-123",
+                        "home_assistant": {
+                            "custom_components": ["other_integration"],
+                        },
+                        "custom_components": ["other_integration"],
+                        "generated_at": "2026-05-23T12:00:00+00:00",
+                        "socketry_protocol_catalog": {
+                            "available": True,
+                            "writable_settings": [
+                                {"id": "oac", "slug": "ac", "action_id": 4}
+                            ],
+                        },
                         "devices": [
                             {
+                                "raw": {
+                                    "modelCode": 13,
+                                    "modelName": "HTE1195000A",
+                                    "devSn": "SN123",
+                                },
                                 "device_sn": "SN123",
                                 "devSn": "SN123",
                                 "name": "Explorer",
+                                "charging_plan_analysis": {
+                                    "charging_plan_keys_reported": [],
+                                },
+                                "property_snapshots": [
+                                    {
+                                        "endpoint": "/v1/device/property",
+                                        "header_profile": "android_apk_1_0_7",
+                                        "parameter_name": "deviceId",
+                                        "parameter_value": 123,
+                                        "http_status": 200,
+                                        "body": json.dumps(
+                                            {"data": {"devSn": "SN123"}}
+                                        ),
+                                        "properties": {"rb": 97},
+                                    }
+                                ],
                                 "probes": [
                                     {
+                                        "endpoint": "/v1/device/chargePlan",
+                                        "interesting": True,
                                         "parameter_name": "deviceSn",
                                         "parameter_value": "SN123",
                                         "body": json.dumps(
@@ -175,21 +209,22 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
             result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 
-        self.assertEqual(result["entry"]["data"]["email"], "**REDACTED**")
-        self.assertEqual(result["entry"]["data"]["password"], "**REDACTED**")
-        self.assertEqual(result["entry"]["data"]["token"], "**REDACTED**")
-        self.assertTrue(result["probe_task"]["exists"])
-        self.assertTrue(result["probe_task"]["done"])
-        content = result["result_file"]["content"]
-        self.assertEqual(content["account"], "**REDACTED**")
-        self.assertEqual(content["token"], "**REDACTED**")
-        self.assertEqual(content["devices"][0]["device_sn"], "**REDACTED**")
-        self.assertEqual(content["devices"][0]["devSn"], "**REDACTED**")
-        self.assertEqual(content["devices"][0]["name"], "Explorer")
-        probe = content["devices"][0]["probes"][0]
+        self.assertEqual(result["source"], "jackery_diagnostics")
+        self.assertNotIn("entry", result)
+        self.assertNotIn("probe_task", result)
+        self.assertNotIn("content", result["result_file"])
+        self.assertEqual(result["probe"]["generated_at"], "2026-05-23T12:00:00+00:00")
+        device = result["probe"]["devices"][0]
+        self.assertEqual(device["model"]["modelCode"], 13)
+        self.assertEqual(device["model"]["modelName"], "HTE1195000A")
+        self.assertEqual(device["property_snapshots"][0]["properties"], {"rb": 97})
+        probe = device["interesting_probes"][0]
         self.assertEqual(probe["parameter_value"], "**REDACTED**")
         self.assertNotIn("SN123", probe["body"])
         self.assertNotIn("token-123", probe["body"])
+        serialized = json.dumps(result)
+        self.assertNotIn("other_integration", serialized)
+        self.assertNotIn("custom_components", serialized)
 
     async def test_diagnostics_download_handles_missing_result_file(self) -> None:
         hass = FakeHass()
@@ -201,7 +236,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 
         self.assertFalse(result["result_file"]["exists"])
-        self.assertIsNone(result["result_file"]["content"])
+        self.assertIsNone(result["probe"])
 
 
 if __name__ == "__main__":

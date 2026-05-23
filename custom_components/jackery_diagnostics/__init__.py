@@ -11,7 +11,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .api import format_probe_notification, run_diagnostic_probe
+from .api import compare_probe_results, format_probe_notification, run_diagnostic_probe
 from .const import DOMAIN, NOTIFICATION_ID, NOTIFICATION_TITLE, RESULTS_PATH
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +51,8 @@ async def _async_run_probe(hass: HomeAssistant, entry: JackeryConfigEntry) -> No
         entry.data["password"],
         entry.data.get("token"),
     )
+    previous_result = await hass.async_add_executor_job(_read_results_file)
+    result["previous_result_diff"] = compare_probe_results(previous_result, result)
 
     if result.get("token") and result["token"] != entry.data.get("token"):
         hass.config_entries.async_update_entry(
@@ -79,3 +81,16 @@ def _write_results_file(result: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     _LOGGER.info("Wrote Jackery diagnostics results to %s", RESULTS_PATH)
+
+
+def _read_results_file() -> dict[str, Any] | None:
+    """Read the previous result file when available."""
+    if not RESULTS_PATH.exists():
+        return None
+    try:
+        return json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        _LOGGER.warning(
+            "Could not read previous Jackery diagnostics results: %s", err
+        )
+        return None

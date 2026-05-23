@@ -95,8 +95,14 @@ def _install_common_stubs(stubbed_modules: dict[str, object]) -> None:
             "devices": [],
         }
 
+    def compare_probe_results(previous, current):
+        if previous is None:
+            return None
+        return {"property_changes": []}
+
     api_mod.format_probe_notification = format_probe_notification
     api_mod.run_diagnostic_probe = run_diagnostic_probe
+    api_mod.compare_probe_results = compare_probe_results
     _install_stub_module(stubbed_modules, f"{TEST_PACKAGE}.api", api_mod)
 
     const_mod = types.ModuleType(f"{TEST_PACKAGE}.const")

@@ -34,8 +34,11 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(self.manifest["domain"], "jackery_diagnostics")
         self.assertEqual(self.manifest["name"], "Jackery Diagnostics")
         self.assertEqual(self.manifest["dependencies"], [])
-        self.assertEqual(self.manifest["requirements"], ["pycryptodomex>=3.9.0"])
-        self.assertEqual(self.manifest["version"], "1.0.1")
+        self.assertEqual(
+            self.manifest["requirements"],
+            ["pycryptodomex>=3.9.0", "socketry>=0.2.4"],
+        )
+        self.assertEqual(self.manifest["version"], "1.3")
         self.assertEqual(self.manifest["iot_class"], "cloud_polling")
         self.assertTrue(self.manifest["config_flow"])
 
@@ -48,6 +51,9 @@ class MetadataTests(unittest.TestCase):
         self.assertIn("Settings > Devices & Services > Integrations", self.readme)
         self.assertIn("wait about 30 seconds", self.readme.lower())
         self.assertIn("/config/jackery_diagnostics_results.json", self.readme)
+        self.assertIn("previous_result_diff", self.readme)
+        self.assertIn("charging_plan_analysis", self.readme)
+        self.assertIn("Socketry", self.readme)
 
     def test_english_translations_match_source_strings(self) -> None:
         self.assertEqual(self.translations, self.strings)

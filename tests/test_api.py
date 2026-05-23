@@ -27,12 +27,29 @@ from custom_components.jackery_diagnostics.api import (
     JackeryConnectionError,
     JackeryDiagnosticsClient,
     build_login_payload,
+    compare_probe_results,
     encrypt_login_payload,
     format_probe_notification,
     generate_mac_id,
     is_interesting_response,
 )
-from custom_components.jackery_diagnostics.const import AES_KEY, PROBE_ENDPOINTS
+from custom_components.jackery_diagnostics.const import (
+    AES_KEY,
+    EXTENDED_IDENTIFIER_NAMES,
+    EXTENDED_PROBE_ENDPOINTS,
+    PROPERTY_SNAPSHOT_PROFILES,
+    PROBE_ENDPOINTS,
+)
+
+
+def _read_only_probe_count(*, has_device_code: bool = False) -> int:
+    """Return the number of GET responses needed after discovery."""
+    legacy_count = len(PROBE_ENDPOINTS) * 2
+    snapshot_count = len(PROPERTY_SNAPSHOT_PROFILES)
+    identifier_count = len(EXTENDED_IDENTIFIER_NAMES)
+    if not has_device_code:
+        identifier_count -= 1
+    return legacy_count + snapshot_count + (len(EXTENDED_PROBE_ENDPOINTS) * identifier_count)
 
 
 class GenerateMacIdTests(unittest.TestCase):
@@ -107,15 +124,26 @@ class LoginAndProbeTests(unittest.TestCase):
             ),
             *[
                 Mock(status_code=404, text='{"code":404,"msg":"not found"}')
-                for _ in range(len(PROBE_ENDPOINTS) * 2)
+                for _ in range(_read_only_probe_count())
             ],
         ]
 
-        result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
+        with patch("custom_components.jackery_diagnostics.api.SocketryClient", None):
+            result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
 
         self.assertIsNone(result["fatal_error"])
         self.assertEqual(len(result["devices"]), 1)
         self.assertEqual(len(result["devices"][0]["probes"]), len(PROBE_ENDPOINTS) * 2)
+        self.assertEqual(
+            len(result["devices"][0]["property_snapshots"]),
+            len(PROPERTY_SNAPSHOT_PROFILES),
+        )
+        self.assertEqual(
+            len(result["devices"][0]["extended_probes"]),
+            len(EXTENDED_PROBE_ENDPOINTS) * (len(EXTENDED_IDENTIFIER_NAMES) - 1),
+        )
+        self.assertIn("charging_plan_analysis", result["devices"][0])
+        self.assertFalse(result["socketry_mqtt_capture"]["available"])
         probe_call_params = [call.kwargs["params"] for call in mock_get.call_args_list[1:]]
         self.assertIn({"deviceId": 123}, probe_call_params)
         self.assertIn({"deviceSn": "SN123"}, probe_call_params)
@@ -136,11 +164,12 @@ class LoginAndProbeTests(unittest.TestCase):
             ),
             *[
                 Mock(status_code=404, text='{"code":404,"msg":"not found"}')
-                for _ in range(len(PROBE_ENDPOINTS) * 2)
+                for _ in range(_read_only_probe_count())
             ],
         ]
 
-        result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
+        with patch("custom_components.jackery_diagnostics.api.SocketryClient", None):
+            result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
 
         self.assertEqual(result["devices"][0]["id"], 456)
         self.assertEqual(result["devices"][0]["device_sn"], "DEV456")
@@ -160,11 +189,12 @@ class LoginAndProbeTests(unittest.TestCase):
             JackeryConnectionError("timed out"),
             *[
                 Mock(status_code=404, text='{"code":404}')
-                for _ in range((len(PROBE_ENDPOINTS) * 2) - 1)
+                for _ in range(_read_only_probe_count() - 1)
             ],
         ]
 
-        result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
+        with patch("custom_components.jackery_diagnostics.api.SocketryClient", None):
+            result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
 
         self.assertEqual(result["devices"][0]["probes"][0]["http_status"], "ERROR")
         self.assertEqual(result["devices"][0]["probes"][0]["body"], "timed out")
@@ -225,6 +255,46 @@ class LoginAndProbeTests(unittest.TestCase):
         self.assertIn("Discovery HTTP status: 200", notification)
         self.assertIn("Skipped device rows: 1", notification)
         self.assertIn("Discovery response:", notification)
+
+    def test_compare_probe_results_reports_property_changes(self) -> None:
+        previous = {
+            "generated_at": "2026-04-20T10:00:00+00:00",
+            "fatal_error": None,
+            "devices": [
+                {
+                    "id": 123,
+                    "device_sn": "SN123",
+                    "name": "Explorer 5000 Plus",
+                    "property_snapshots": [
+                        {"properties": {"oac": 0, "rb": 97, "old": 1}}
+                    ],
+                }
+            ],
+        }
+        current = {
+            "generated_at": "2026-04-20T10:05:00+00:00",
+            "fatal_error": None,
+            "devices": [
+                {
+                    "id": 123,
+                    "device_sn": "SN123",
+                    "name": "Explorer 5000 Plus",
+                    "property_snapshots": [
+                        {"properties": {"oac": 1, "rb": 97, "new": 2}}
+                    ],
+                }
+            ],
+        }
+
+        diff = compare_probe_results(previous, current)
+
+        assert diff is not None
+        self.assertEqual(diff["previous_generated_at"], previous["generated_at"])
+        self.assertEqual(len(diff["property_changes"]), 1)
+        change = diff["property_changes"][0]
+        self.assertEqual(change["changed"], {"oac": {"before": 0, "after": 1}})
+        self.assertEqual(change["added"], {"new": 2})
+        self.assertEqual(change["removed"], {"old": 1})
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
   "domain": "jackery_diagnostics",
   "name": "Jackery Diagnostics",
-  "version": "1.0.1",
+  "version": "1.3",
   "documentation": "https://github.com/usersaynoso/Jackery-Diagnostics/blob/main/README.md",
   "issue_tracker": "https://github.com/usersaynoso/Jackery-Diagnostics/issues",
   "codeowners": [
@@ -9,7 +9,8 @@
   ],
   "dependencies": [],
   "requirements": [
-    "pycryptodomex>=3.9.0"
+    "pycryptodomex>=3.9.0",
+    "socketry>=0.2.4"
   ],
   "config_flow": true,
   "integration_type": "service",

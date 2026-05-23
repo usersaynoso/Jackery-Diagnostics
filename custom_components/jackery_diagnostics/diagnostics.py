@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, RESULTS_PATH
+from .const import DOMAIN, INTEGRATION_VERSION, RESULTS_PATH
 
 TO_REDACT = {
     "account",
@@ -60,7 +61,10 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostic data for Home Assistant's download diagnostics action."""
     result_file = await hass.async_add_executor_job(_read_results_file)
-    return _redact_download_data(_build_scoped_download(result_file))
+    runtime_status = _runtime_probe_status(hass, entry)
+    return _redact_download_data(
+        _build_scoped_download(result_file, runtime_status)
+    )
 
 
 def _read_results_file() -> dict[str, Any]:
@@ -73,9 +77,14 @@ def _read_results_file() -> dict[str, Any]:
         }
 
     try:
+        stat = RESULTS_PATH.stat()
         return {
             "exists": True,
             "path": str(RESULTS_PATH),
+            "modified_at": datetime.fromtimestamp(
+                stat.st_mtime,
+                timezone.utc,
+            ).isoformat(),
             "content": json.loads(RESULTS_PATH.read_text(encoding="utf-8")),
         }
     except json.JSONDecodeError as err:
@@ -99,26 +108,42 @@ def _redact_download_data(data: dict[str, Any]) -> dict[str, Any]:
     return _redact_nested(async_redact_data(data, TO_REDACT))
 
 
-def _build_scoped_download(result_file: dict[str, Any]) -> dict[str, Any]:
+def _build_scoped_download(
+    result_file: dict[str, Any],
+    runtime_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a narrow diagnostics payload for charging-plan investigation only."""
     content = result_file.get("content")
     payload: dict[str, Any] = {
         "schema_version": 1,
         "source": DOMAIN,
+        "diagnostics_plugin_version": INTEGRATION_VERSION,
         "scope": "Jackery charging-plan diagnostics only",
         "result_file": {
             "exists": result_file.get("exists", False),
+            "modified_at": result_file.get("modified_at"),
             "error": result_file.get("error"),
         },
     }
 
     if not isinstance(content, dict):
-        payload["probe"] = None
+        payload["probe"] = (
+            {"run_status": runtime_status}
+            if runtime_status
+            else None
+        )
         return payload
 
     devices = content.get("devices", [])
     payload["probe"] = {
         "generated_at": content.get("generated_at"),
+        "diagnostics_plugin_version": content.get(
+            "diagnostics_plugin_version"
+        ),
+        "run_status": _scope_run_status(
+            content.get("run_status"),
+            runtime_status,
+        ),
         "fatal_error": content.get("fatal_error"),
         "device_count": len(devices) if isinstance(devices, list) else 0,
         "discovery": _summarize_discovery(content.get("discovery")),
@@ -140,6 +165,63 @@ def _build_scoped_download(result_file: dict[str, Any]) -> dict[str, Any]:
         else [],
     }
     return payload
+
+
+def _runtime_probe_status(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> dict[str, Any] | None:
+    """Return current in-memory probe task status when available."""
+    stored = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if stored is None:
+        return None
+
+    task = None
+    status: dict[str, Any] = {}
+    if isinstance(stored, dict):
+        status = {
+            key: value
+            for key, value in stored.items()
+            if key != "task"
+        }
+        task = stored.get("task")
+    else:
+        task = stored
+
+    if task is None:
+        return status or None
+
+    task_done = task.done()
+    task_status = "completed" if task_done else "running"
+    task_error = None
+    if task.cancelled():
+        task_status = "cancelled"
+    elif task_done:
+        exception = task.exception()
+        if exception is not None:
+            task_status = "failed"
+            task_error = f"{exception.__class__.__name__}: {exception}"
+
+    if not status.get("status"):
+        status["status"] = task_status
+    status["task_status"] = task_status
+    status["task_done"] = task_done
+    if task_error and not status.get("error"):
+        status["error"] = task_error
+    return status
+
+
+def _scope_run_status(
+    file_status: Any,
+    runtime_status: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Merge persisted and in-memory probe run status."""
+    scoped: dict[str, Any] = {}
+    if isinstance(file_status, dict):
+        scoped.update(file_status)
+    if runtime_status:
+        scoped["runtime"] = runtime_status
+    return scoped or None
 
 
 def _summarize_discovery(discovery: Any) -> dict[str, Any]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 DOMAIN = "jackery_diagnostics"
+INTEGRATION_VERSION = "1.8"
 BASE_URL = "https://iot.jackeryapp.com"
 LOGIN_ENDPOINT = "/v1/auth/login"
 DEVICE_LIST_ENDPOINT = "/v1/device/bind/list"

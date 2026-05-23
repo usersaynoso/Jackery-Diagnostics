@@ -7,6 +7,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -107,6 +108,7 @@ def _install_common_stubs(stubbed_modules: dict[str, object]) -> None:
 
     const_mod = types.ModuleType(f"{TEST_PACKAGE}.const")
     const_mod.DOMAIN = "jackery_diagnostics"
+    const_mod.INTEGRATION_VERSION = "1.8"
     const_mod.NOTIFICATION_ID = "jackery_diagnostics_results"
     const_mod.NOTIFICATION_TITLE = "Jackery Diagnostics Results"
     const_mod.RESULTS_PATH = Path("/tmp/placeholder.json")
@@ -175,10 +177,12 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
             setup_ok = await integration.async_setup_entry(hass, entry)
             self.assertTrue(setup_ok)
 
-            task = hass.data["jackery_diagnostics"]["entry-1"]
+            run_state = hass.data["jackery_diagnostics"]["entry-1"]
+            task = run_state["task"]
             await task
 
             self.assertEqual(entry.data["token"], "fresh-token")
+            self.assertEqual(run_state["status"], "completed")
             self.assertEqual(len(hass.services.calls), 1)
             call = hass.services.calls[0]
             self.assertEqual(call[0], "persistent_notification")
@@ -187,11 +191,125 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
 
             persisted = json.loads(integration.RESULTS_PATH.read_text(encoding="utf-8"))
             self.assertEqual(persisted["account"], "dev@example.com")
+            self.assertEqual(persisted["diagnostics_plugin_version"], "1.8")
+            self.assertEqual(persisted["run_status"]["status"], "completed")
+            self.assertEqual(persisted["run_status"]["plugin_version"], "1.8")
+
+    async def test_setup_entry_overwrites_stale_results_while_probe_runs(
+        self,
+    ) -> None:
+        hass = FakeHass()
+        entry = ConfigEntry(
+            "entry-1",
+            {"email": "dev@example.com", "password": "secret", "token": "old-token"},
+        )
+        release_probe = threading.Event()
+        original_probe = integration.run_diagnostic_probe
+
+        def blocking_probe(email, password, token=None):
+            release_probe.wait(timeout=5)
+            return {
+                "generated_at": "2026-04-20T10:05:00+00:00",
+                "account": email,
+                "token": token,
+                "fatal_error": None,
+                "discovery": {},
+                "devices": [],
+            }
+
+        integration.run_diagnostic_probe = blocking_probe
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                integration.RESULTS_PATH = (
+                    Path(tmpdir) / "jackery_diagnostics_results.json"
+                )
+                integration.RESULTS_PATH.write_text(
+                    json.dumps(
+                        {
+                            "generated_at": "2026-04-20T09:00:00+00:00",
+                            "devices": [{"name": "stale"}],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                setup_ok = await integration.async_setup_entry(hass, entry)
+                self.assertTrue(setup_ok)
+
+                for _ in range(100):
+                    persisted = json.loads(
+                        integration.RESULTS_PATH.read_text(encoding="utf-8")
+                    )
+                    if persisted.get("run_status", {}).get("status") == "running":
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    self.fail("Probe did not write running status")
+
+                self.assertEqual(persisted["devices"], [])
+                self.assertEqual(persisted["run_status"]["phase"], "probe_running")
+                self.assertEqual(
+                    persisted["previous_result_diff"]["previous_generated_at"],
+                    "2026-04-20T09:00:00+00:00",
+                )
+
+                release_probe.set()
+                await hass.data["jackery_diagnostics"]["entry-1"]["task"]
+        finally:
+            integration.run_diagnostic_probe = original_probe
+
+    async def test_setup_entry_persists_probe_failure_instead_of_stale_result(
+        self,
+    ) -> None:
+        hass = FakeHass()
+        entry = ConfigEntry(
+            "entry-1",
+            {"email": "dev@example.com", "password": "secret", "token": "old-token"},
+        )
+        original_probe = integration.run_diagnostic_probe
+
+        def failing_probe(email, password, token=None):
+            raise RuntimeError("boom")
+
+        integration.run_diagnostic_probe = failing_probe
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                integration.RESULTS_PATH = (
+                    Path(tmpdir) / "jackery_diagnostics_results.json"
+                )
+                integration.RESULTS_PATH.write_text(
+                    json.dumps(
+                        {
+                            "generated_at": "2026-04-20T09:00:00+00:00",
+                            "devices": [{"name": "stale"}],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                setup_ok = await integration.async_setup_entry(hass, entry)
+                self.assertTrue(setup_ok)
+                run_state = hass.data["jackery_diagnostics"]["entry-1"]
+                await run_state["task"]
+
+                persisted = json.loads(
+                    integration.RESULTS_PATH.read_text(encoding="utf-8")
+                )
+                self.assertEqual(run_state["status"], "failed")
+                self.assertEqual(persisted["devices"], [])
+                self.assertEqual(persisted["fatal_error"], "RuntimeError: boom")
+                self.assertEqual(persisted["run_status"]["status"], "failed")
+                self.assertEqual(
+                    persisted["previous_result_diff"]["previous_generated_at"],
+                    "2026-04-20T09:00:00+00:00",
+                )
+        finally:
+            integration.run_diagnostic_probe = original_probe
 
     async def test_unload_entry_cancels_running_task(self) -> None:
         hass = FakeHass()
         task = asyncio.create_task(asyncio.sleep(60))
-        hass.data["jackery_diagnostics"] = {"entry-1": task}
+        hass.data["jackery_diagnostics"] = {"entry-1": {"task": task}}
         entry = ConfigEntry("entry-1", {})
 
         unload_ok = await integration.async_unload_entry(hass, entry)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import sys
@@ -102,6 +103,7 @@ def _install_common_stubs(stubbed_modules: dict[str, object]) -> None:
 
     const_mod = types.ModuleType(f"{TEST_PACKAGE}.const")
     const_mod.DOMAIN = "jackery_diagnostics"
+    const_mod.INTEGRATION_VERSION = "1.8"
     const_mod.RESULTS_PATH = Path("/tmp/placeholder.json")
     _install_stub_module(stubbed_modules, f"{TEST_PACKAGE}.const", const_mod)
 
@@ -154,6 +156,14 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                         },
                         "custom_components": ["other_integration"],
                         "generated_at": "2026-05-23T12:00:00+00:00",
+                        "diagnostics_plugin_version": "1.8",
+                        "run_status": {
+                            "status": "completed",
+                            "phase": "probe_completed",
+                            "started_at": "2026-05-23T11:55:00+00:00",
+                            "finished_at": "2026-05-23T12:00:00+00:00",
+                            "plugin_version": "1.8",
+                        },
                         "previous_result_diff": {
                             "previous_generated_at": "older",
                             "current_generated_at": "newer",
@@ -351,10 +361,18 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 
         self.assertEqual(result["source"], "jackery_diagnostics")
+        self.assertEqual(result["diagnostics_plugin_version"], "1.8")
         self.assertNotIn("entry", result)
         self.assertNotIn("probe_task", result)
         self.assertNotIn("content", result["result_file"])
+        self.assertIn("modified_at", result["result_file"])
         self.assertEqual(result["probe"]["generated_at"], "2026-05-23T12:00:00+00:00")
+        self.assertEqual(result["probe"]["diagnostics_plugin_version"], "1.8")
+        self.assertEqual(result["probe"]["run_status"]["status"], "completed")
+        self.assertEqual(
+            result["probe"]["run_status"]["runtime"]["task_status"],
+            "completed",
+        )
         device = result["probe"]["devices"][0]
         self.assertEqual(device["model"]["modelCode"], 13)
         self.assertEqual(device["model"]["modelName"], "HTE1195000A")
@@ -430,6 +448,40 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["result_file"]["exists"])
         self.assertIsNone(result["probe"])
+
+    async def test_diagnostics_download_reports_running_task_without_result_file(
+        self,
+    ) -> None:
+        hass = FakeHass()
+        entry = ConfigEntry("entry-1", {})
+        task = asyncio.create_task(asyncio.sleep(60))
+        hass.data["jackery_diagnostics"]["entry-1"] = {
+            "status": "running",
+            "phase": "probe_running",
+            "started_at": "2026-05-23T12:00:00+00:00",
+            "plugin_version": "1.8",
+            "task": task,
+        }
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                diagnostics.RESULTS_PATH = Path(tmpdir) / "missing.json"
+
+                result = await diagnostics.async_get_config_entry_diagnostics(
+                    hass,
+                    entry,
+                )
+
+            self.assertFalse(result["result_file"]["exists"])
+            self.assertEqual(result["probe"]["run_status"]["status"], "running")
+            self.assertEqual(
+                result["probe"]["run_status"]["task_status"],
+                "running",
+            )
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 if __name__ == "__main__":

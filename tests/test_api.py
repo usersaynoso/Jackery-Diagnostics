@@ -28,6 +28,7 @@ from custom_components.jackery_diagnostics.api import (
     JackeryDiagnosticsClient,
     build_implementation_readiness,
     build_response_catalog,
+    build_tuya_schema_catalog,
     build_tuya_fingerprint,
     build_login_payload,
     compare_probe_results,
@@ -38,8 +39,10 @@ from custom_components.jackery_diagnostics.api import (
 )
 from custom_components.jackery_diagnostics.const import (
     AES_KEY,
+    EXTENDED_HEADER_PROFILES,
     EXTENDED_IDENTIFIER_NAMES,
     EXTENDED_PROBE_ENDPOINTS,
+    PATH_TEMPLATE_PROBE_ENDPOINTS,
     METHOD_DISCOVERY_ENDPOINTS,
     METHOD_DISCOVERY_METHODS,
     PROPERTY_SNAPSHOT_PROFILES,
@@ -48,7 +51,9 @@ from custom_components.jackery_diagnostics.const import (
     READ_ONLY_POST_HEADER_PROFILES,
     READ_ONLY_POST_IDENTIFIER_NAMES,
     READ_ONLY_POST_PROBE_ENDPOINTS,
+    TARGETED_PROPERTY_PROBE_ENDPOINTS,
     TUYA_PATH_PROBE_ENDPOINTS,
+    TUYA_PRODUCT_PROBE_ENDPOINTS,
 )
 
 
@@ -56,21 +61,52 @@ def _read_only_probe_count(*, has_device_code: bool = False) -> int:
     """Return the number of GET responses needed after discovery."""
     legacy_count = len(PROBE_ENDPOINTS) * 2
     snapshot_count = len(PROPERTY_SNAPSHOT_PROFILES)
-    identifier_count = len(EXTENDED_IDENTIFIER_NAMES)
+    extended_query_count = _extended_query_variant_count(
+        has_device_code=has_device_code
+    )
+    targeted_property_count = _targeted_property_variant_count()
+    path_template_count = len(PATH_TEMPLATE_PROBE_ENDPOINTS) * len(
+        EXTENDED_HEADER_PROFILES
+    )
     if not has_device_code:
-        identifier_count -= 1
-    tuya_path_count = len(TUYA_PATH_PROBE_ENDPOINTS) - 1
-    if has_device_code:
-        tuya_path_count += 1
+        tuya_path_count = len(TUYA_PATH_PROBE_ENDPOINTS) - 1
+    else:
+        tuya_path_count = len(TUYA_PATH_PROBE_ENDPOINTS)
+    tuya_product_identifier_count = 0
     return (
         legacy_count
         + snapshot_count
-        + (len(EXTENDED_PROBE_ENDPOINTS) * identifier_count)
+        + (
+            len(EXTENDED_PROBE_ENDPOINTS)
+            * extended_query_count
+            * len(EXTENDED_HEADER_PROFILES)
+        )
+        + (
+            len(TARGETED_PROPERTY_PROBE_ENDPOINTS)
+            * targeted_property_count
+            * len(EXTENDED_HEADER_PROFILES)
+        )
+        + path_template_count
         + tuya_path_count
+        + (len(TUYA_PRODUCT_PROBE_ENDPOINTS) * tuya_product_identifier_count)
     )
 
 
-def _read_only_post_count(*, has_device_code: bool = False) -> int:
+def _extended_query_variant_count(*, has_device_code: bool = False) -> int:
+    identifier_count = len(EXTENDED_IDENTIFIER_NAMES)
+    if not has_device_code:
+        identifier_count -= 1
+    combined_count = 5 + (1 if has_device_code else 0)
+    return identifier_count + combined_count
+
+
+def _targeted_property_variant_count() -> int:
+    base_id_shape_count = 4
+    per_base_selector_count = 10
+    return base_id_shape_count * per_base_selector_count
+
+
+def _identifier_post_count(*, has_device_code: bool = False) -> int:
     """Return the number of read-only POST probe responses needed after login."""
     identifier_count = len(READ_ONLY_POST_IDENTIFIER_NAMES)
     if not has_device_code:
@@ -84,6 +120,21 @@ def _read_only_post_count(*, has_device_code: bool = False) -> int:
         * len(READ_ONLY_POST_BODY_FORMATS)
         * len(READ_ONLY_POST_HEADER_PROFILES)
     )
+
+
+def _targeted_property_post_count() -> int:
+    return (
+        len(TARGETED_PROPERTY_PROBE_ENDPOINTS)
+        * _targeted_property_variant_count()
+        * len(READ_ONLY_POST_BODY_FORMATS)
+        * len(READ_ONLY_POST_HEADER_PROFILES)
+    )
+
+
+def _read_only_post_count(*, has_device_code: bool = False) -> int:
+    return _identifier_post_count(
+        has_device_code=has_device_code
+    ) + _targeted_property_post_count()
 
 
 def _method_discovery_count() -> int:
@@ -194,15 +245,31 @@ class LoginAndProbeTests(unittest.TestCase):
         )
         self.assertEqual(
             len(result["devices"][0]["extended_probes"]),
-            len(EXTENDED_PROBE_ENDPOINTS) * (len(EXTENDED_IDENTIFIER_NAMES) - 1),
+            len(EXTENDED_PROBE_ENDPOINTS)
+            * _extended_query_variant_count()
+            * len(EXTENDED_HEADER_PROFILES),
+        )
+        self.assertEqual(
+            len(result["devices"][0]["targeted_property_probes"]),
+            len(TARGETED_PROPERTY_PROBE_ENDPOINTS)
+            * _targeted_property_variant_count()
+            * len(EXTENDED_HEADER_PROFILES),
         )
         self.assertEqual(
             len(result["devices"][0]["post_read_probes"]),
-            _read_only_post_count(),
+            _identifier_post_count(),
+        )
+        self.assertEqual(
+            len(result["devices"][0]["targeted_property_post_probes"]),
+            _targeted_property_post_count(),
         )
         self.assertEqual(
             len(result["devices"][0]["method_discovery_probes"]),
             _method_discovery_count(),
+        )
+        self.assertEqual(
+            len(result["devices"][0]["path_template_probes"]),
+            len(PATH_TEMPLATE_PROBE_ENDPOINTS) * len(EXTENDED_HEADER_PROFILES),
         )
         post_probe = result["devices"][0]["post_read_probes"][0]
         self.assertEqual(post_probe["method"], "POST")
@@ -214,6 +281,7 @@ class LoginAndProbeTests(unittest.TestCase):
             len(TUYA_PATH_PROBE_ENDPOINTS) - 1,
         )
         self.assertIn("tuya_fingerprint", result["devices"][0])
+        self.assertIn("tuya_schema_catalog", result["devices"][0])
         self.assertIn("charging_plan_analysis", result["devices"][0])
         self.assertIn("response_catalog", result["devices"][0])
         self.assertIn("implementation_readiness", result["devices"][0])
@@ -386,6 +454,50 @@ class LoginAndProbeTests(unittest.TestCase):
         )
         self.assertEqual(dev_id_hit["value_preview"], "<redacted>")
 
+    def test_tuya_schema_catalog_extracts_charging_plan_entries(self) -> None:
+        catalog = build_tuya_schema_catalog(
+            {"raw": {}},
+            [
+                {
+                    "method": "GET",
+                    "endpoint": "/v1/device/schema",
+                    "payload_variant": "deviceId",
+                    "body": json.dumps(
+                        {
+                            "code": 0,
+                            "data": {
+                                "functions": [
+                                    {
+                                        "code": "charge_plan",
+                                        "dpId": 107,
+                                        "type": "Boolean",
+                                        "mode": "rw",
+                                        "values": "{}",
+                                    }
+                                ],
+                                "status": [
+                                    {
+                                        "code": "time_plan",
+                                        "dpId": 108,
+                                        "type": "Raw",
+                                        "mode": "ro",
+                                    }
+                                ],
+                            },
+                        }
+                    ),
+                }
+            ],
+            [],
+        )
+
+        self.assertEqual(catalog["entry_count"], 2)
+        self.assertEqual(catalog["charging_plan_candidate_count"], 2)
+        self.assertEqual(
+            catalog["charging_plan_candidates"][0]["code"],
+            "charge_plan",
+        )
+
     def test_response_catalog_and_readiness_summarize_evidence(self) -> None:
         probes = [
             {
@@ -512,6 +624,63 @@ class LoginAndProbeTests(unittest.TestCase):
         self.assertEqual(change["changed"], {"oac": {"before": 0, "after": 1}})
         self.assertEqual(change["added"], {"new": 2})
         self.assertEqual(change["removed"], {"old": 1})
+
+    def test_compare_probe_results_reports_probe_hash_changes(self) -> None:
+        previous = {
+            "generated_at": "2026-04-20T10:00:00+00:00",
+            "fatal_error": None,
+            "devices": [
+                {
+                    "id": 123,
+                    "device_sn": "SN123",
+                    "name": "Explorer 5000 Plus",
+                    "property_snapshots": [{"properties": {"rb": 97}}],
+                    "post_read_probes": [
+                        {
+                            "method": "POST",
+                            "endpoint": "/v1/device/chargePlan/list",
+                            "probe_family": "post_read",
+                            "payload_variant": "deviceId",
+                            "parameter_name": "deviceId",
+                            "http_status": 200,
+                            "body": '{"code":0,"data":{"charge_plan":false}}',
+                        }
+                    ],
+                }
+            ],
+        }
+        current = {
+            "generated_at": "2026-04-20T10:05:00+00:00",
+            "fatal_error": None,
+            "devices": [
+                {
+                    "id": 123,
+                    "device_sn": "SN123",
+                    "name": "Explorer 5000 Plus",
+                    "property_snapshots": [{"properties": {"rb": 97}}],
+                    "post_read_probes": [
+                        {
+                            "method": "POST",
+                            "endpoint": "/v1/device/chargePlan/list",
+                            "probe_family": "post_read",
+                            "payload_variant": "deviceId",
+                            "parameter_name": "deviceId",
+                            "http_status": 200,
+                            "body": '{"code":0,"data":{"charge_plan":true}}',
+                        }
+                    ],
+                }
+            ],
+        }
+
+        diff = compare_probe_results(previous, current)
+
+        assert diff is not None
+        self.assertEqual(diff["property_changes"], [])
+        self.assertEqual(diff["probe_response_changes"][0]["changed_count"], 1)
+        after = diff["probe_response_changes"][0]["changed"][0]["after"]
+        self.assertEqual(after["endpoint"], "/v1/device/chargePlan/list")
+        self.assertIn("charge_plan", after["charging_plan_terms"])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
   "domain": "jackery_diagnostics",
   "name": "Jackery Diagnostics",
-  "version": "1.6",
+  "version": "1.7",
   "documentation": "https://github.com/usersaynoso/Jackery-Diagnostics/blob/main/README.md",
   "issue_tracker": "https://github.com/usersaynoso/Jackery-Diagnostics/issues",
   "codeowners": [

@@ -23,7 +23,10 @@ from .const import (
     AES_KEY,
     AUTH_HEADERS,
     BASE_URL,
+    CHARGING_PLAN_CODE_TERMS,
+    CHARGING_PLAN_PROPERTY_KEYS,
     DEVICE_LIST_ENDPOINT,
+    EXTENDED_HEADER_PROFILES,
     EXTENDED_IDENTIFIER_NAMES,
     EXTENDED_PROBE_ENDPOINTS,
     FIXED_MAC_ID_SEED,
@@ -32,6 +35,7 @@ from .const import (
     METHOD_DISCOVERY_ENDPOINTS,
     METHOD_DISCOVERY_METHODS,
     MQTT_CAPTURE_SECONDS,
+    PATH_TEMPLATE_PROBE_ENDPOINTS,
     PROPERTY_SNAPSHOT_PROFILES,
     PROBE_ENDPOINTS,
     READ_ONLY_POST_BODY_FORMATS,
@@ -41,9 +45,11 @@ from .const import (
     REQUEST_TIMEOUT,
     RSA_PUBLIC_KEY,
     SOURCE_SCAN_TERMS,
+    TARGETED_PROPERTY_PROBE_ENDPOINTS,
     TUYA_CHARGING_PLAN_TERMS,
     TUYA_FINGERPRINT_FIELDS,
     TUYA_PATH_PROBE_ENDPOINTS,
+    TUYA_PRODUCT_PROBE_ENDPOINTS,
 )
 
 try:
@@ -282,6 +288,170 @@ def _response_json_shape(body: str) -> dict[str, Any]:
     else:
         shape["data_type"] = type(data).__name__ if data is not None else "none"
     return shape
+
+
+def _parse_jsonish_value(value: Any) -> Any:
+    """Parse nested JSON strings commonly used in Tuya schema value fields."""
+    if not isinstance(value, str):
+        return value
+
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return value
+
+
+def _schema_entry_preview(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    parsed = _parse_jsonish_value(value)
+    if isinstance(parsed, dict):
+        return _candidate_payload_preview(
+            json.dumps(parsed, sort_keys=True, separators=(",", ":")),
+            240,
+        )
+    if isinstance(parsed, list):
+        return _candidate_payload_preview(
+            json.dumps(parsed[:10], sort_keys=True, separators=(",", ":")),
+            240,
+        )
+    return _candidate_payload_preview(str(parsed), 240)
+
+
+def _schema_code_from_entry(entry: dict[str, Any]) -> str | None:
+    for key in (
+        "code",
+        "dpCode",
+        "dp_code",
+        "identifier",
+        "name",
+        "propCode",
+        "propertyCode",
+    ):
+        value = entry.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _schema_id_from_entry(entry: dict[str, Any]) -> str | None:
+    for key in ("dpId", "dp_id", "id", "propId", "propertyId"):
+        value = entry.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _looks_like_schema_entry(entry: dict[str, Any]) -> bool:
+    schema_fields = {"type", "values", "mode", "rwFlag", "permission"}
+    has_schema_fields = bool(schema_fields & set(entry))
+    return bool(
+        has_schema_fields
+        or (
+            _schema_code_from_entry(entry)
+            and (
+                _schema_id_from_entry(entry)
+                or {"name", "dpName", "desc", "description"} & set(entry)
+            )
+        )
+    )
+
+
+def _schema_entries_from_value(
+    value: Any,
+    *,
+    source: str,
+    path: str = "",
+    container: str | None = None,
+) -> list[dict[str, Any]]:
+    """Extract Tuya-like function/status/datapoint schema entries."""
+    parsed_value = _parse_jsonish_value(value)
+    entries: list[dict[str, Any]] = []
+
+    if isinstance(parsed_value, dict):
+        if _looks_like_schema_entry(parsed_value):
+            code = _schema_code_from_entry(parsed_value)
+            schema_id = _schema_id_from_entry(parsed_value)
+            descriptor = " ".join(
+                str(item)
+                for item in (
+                    code,
+                    schema_id,
+                    parsed_value.get("name"),
+                    parsed_value.get("dpName"),
+                    parsed_value.get("desc"),
+                    parsed_value.get("description"),
+                )
+                if item not in (None, "")
+            )
+            entries.append(
+                {
+                    "source": source,
+                    "path": path or "<root>",
+                    "container": container,
+                    "code": code,
+                    "schema_id": schema_id,
+                    "name": parsed_value.get("name") or parsed_value.get("dpName"),
+                    "type": parsed_value.get("type")
+                    or parsed_value.get("dataType")
+                    or parsed_value.get("valueType"),
+                    "mode": parsed_value.get("mode")
+                    or parsed_value.get("rwFlag")
+                    or parsed_value.get("permission"),
+                    "values_preview": _schema_entry_preview(
+                        parsed_value.get("values")
+                        or parsed_value.get("valueRange")
+                        or parsed_value.get("property")
+                    ),
+                    "charging_plan_candidate": bool(
+                        _find_charging_plan_terms(descriptor)
+                    ),
+                    "terms": _find_charging_plan_terms(descriptor),
+                }
+            )
+
+        for key, item in parsed_value.items():
+            key_text = str(key)
+            key_path = f"{path}.{key_text}" if path else key_text
+            next_container = (
+                key_text
+                if key_text.lower()
+                in {
+                    "dps",
+                    "functions",
+                    "function",
+                    "properties",
+                    "schema",
+                    "status",
+                    "statusset",
+                }
+                else container
+            )
+            entries.extend(
+                _schema_entries_from_value(
+                    item,
+                    source=source,
+                    path=key_path,
+                    container=next_container,
+                )
+            )
+    elif isinstance(parsed_value, list):
+        for index, item in enumerate(parsed_value[:200]):
+            item_path = f"{path}[{index}]" if path else f"[{index}]"
+            entries.extend(
+                _schema_entries_from_value(
+                    item,
+                    source=source,
+                    path=item_path,
+                    container=container,
+                )
+            )
+
+    return entries
 
 
 def _setting_to_dict(setting: Any) -> dict[str, Any]:
@@ -536,6 +706,7 @@ def build_implementation_readiness(
     tuya_fingerprint: dict[str, Any],
     response_catalog: dict[str, Any],
     socketry_metadata: dict[str, Any],
+    tuya_schema_catalog: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Explain whether diagnostics found enough evidence to implement entities."""
     expected = analysis.get("main_integration_expected_entities", {})
@@ -554,6 +725,10 @@ def build_implementation_readiness(
         socketry_metadata.get("charging_plan_entries")
     )
     tuya_has_schema = bool(tuya_fingerprint.get("has_charging_plan_schema_evidence"))
+    schema_has_charging_plan = bool(
+        tuya_schema_catalog
+        and tuya_schema_catalog.get("charging_plan_candidate_count")
+    )
     non_empty_shapes = response_catalog.get("non_empty_data", [])
 
     requirements = {
@@ -567,15 +742,19 @@ def build_implementation_readiness(
             or repeat_entity.get("reported_in_property_snapshots")
             or repeat_entity.get("reported_by_socketry")
         ),
-        "read_endpoint": bool(successful_candidate_reads or tuya_has_schema),
+        "read_endpoint": bool(
+            successful_candidate_reads or tuya_has_schema or schema_has_charging_plan
+        ),
         "write_path": bool(
             socketry_has_charging_write
             or tuya_fingerprint.get("has_charging_plan_schema_evidence")
+            or schema_has_charging_plan
         ),
         "payload_shape": bool(
             socketry_has_charging_write
             or tuya_fingerprint.get("charging_plan_hits")
             or successful_candidate_reads
+            or schema_has_charging_plan
         ),
     }
     missing = [
@@ -589,6 +768,11 @@ def build_implementation_readiness(
         "missing": missing,
         "successful_candidate_reads": successful_candidate_reads[:10],
         "non_empty_response_shapes": non_empty_shapes[:10],
+        "tuya_schema_candidates": (
+            tuya_schema_catalog.get("charging_plan_candidates", [])[:10]
+            if tuya_schema_catalog
+            else []
+        ),
         "next_step_if_not_ready": (
             "If any requirement is missing after this release, Home Assistant "
             "diagnostics alone did not expose the charging-plan contract. The "
@@ -813,6 +997,67 @@ def build_tuya_fingerprint(
     }
 
 
+def build_tuya_schema_catalog(
+    device: dict[str, Any],
+    probes: list[dict[str, Any]],
+    property_snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Extract structured Tuya-like schema rows from any read-only response."""
+    entries: list[dict[str, Any]] = []
+
+    raw = device.get("raw")
+    if isinstance(raw, dict):
+        entries.extend(_schema_entries_from_value(raw, source="device.raw"))
+
+    for snapshot in property_snapshots:
+        properties = snapshot.get("properties")
+        if isinstance(properties, dict):
+            source = f"property_snapshot.{snapshot.get('header_profile')}"
+            entries.extend(_schema_entries_from_value(properties, source=source))
+
+    for probe in probes:
+        body = str(probe.get("body", ""))
+        parsed = _parse_json(body)
+        if parsed is None:
+            continue
+        source = (
+            f"probe.{probe.get('method', 'GET')} "
+            f"{probe.get('endpoint')} "
+            f"{probe.get('payload_variant') or probe.get('parameter_name') or ''}"
+        ).strip()
+        entries.extend(_schema_entries_from_value(parsed, source=source))
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for entry in entries:
+        key = (
+            entry.get("source"),
+            entry.get("path"),
+            entry.get("code"),
+            entry.get("schema_id"),
+            entry.get("type"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+
+    charging_candidates = [
+        entry for entry in deduped if entry.get("charging_plan_candidate")
+    ]
+    return {
+        "entry_count": len(deduped),
+        "charging_plan_candidate_count": len(charging_candidates),
+        "charging_plan_candidates": charging_candidates[:50],
+        "entries": deduped[:100],
+        "diagnosis_hint": (
+            "If this catalog contains charging-plan candidates, its code/id/type/"
+            "mode/values fields are the best evidence for mapping entity state "
+            "and write payloads."
+        ),
+    }
+
+
 def format_probe_notification(results: dict[str, Any]) -> str:
     """Format probe results for a Home Assistant persistent notification."""
     lines = [
@@ -939,12 +1184,29 @@ def format_probe_notification(results: dict[str, Any]) -> str:
             lines.append(
                 f"- Read-only POST probes: {post_interesting} interesting response(s)"
             )
+        targeted_interesting = _interesting_probe_count(
+            device, "targeted_property_probes"
+        )
+        targeted_post_interesting = _interesting_probe_count(
+            device, "targeted_property_post_probes"
+        )
+        if targeted_interesting or targeted_post_interesting:
+            lines.append(
+                "- Targeted 107/108 probes: "
+                f"{targeted_interesting} GET, "
+                f"{targeted_post_interesting} POST interesting response(s)"
+            )
         method_interesting = _interesting_probe_count(
             device, "method_discovery_probes"
         )
         if method_interesting:
             lines.append(
                 f"- Method discovery: {method_interesting} interesting response(s)"
+            )
+        path_interesting = _interesting_probe_count(device, "path_template_probes")
+        if path_interesting:
+            lines.append(
+                f"- Path-template probes: {path_interesting} interesting response(s)"
             )
         analysis = device.get("charging_plan_analysis")
         if analysis:
@@ -978,6 +1240,16 @@ def format_probe_notification(results: dict[str, Any]) -> str:
                     "- Implementation readiness: "
                     f"ready={readiness.get('ready_to_add_entities')}, "
                     f"missing={', '.join(readiness.get('missing', [])) or 'none'}"
+                )
+            )
+        schema_catalog = device.get("tuya_schema_catalog")
+        if schema_catalog:
+            lines.append(
+                (
+                    "- Tuya schema catalog: "
+                    f"{schema_catalog.get('entry_count', 0)} entries, "
+                    f"{schema_catalog.get('charging_plan_candidate_count', 0)} "
+                    "charging-plan candidate(s)"
                 )
             )
 
@@ -1273,15 +1545,17 @@ class JackeryDiagnosticsClient:
         self,
         device: dict[str, Any],
         endpoint: str,
+        params: dict[str, Any],
         parameter_name: str,
         parameter_value: str | int,
         header_profile: str,
+        payload_variant: str,
     ) -> dict[str, Any]:
         """Run one extended read-only probe with a named header profile."""
         try:
             response = self._get_with_header_profile(
                 endpoint,
-                {parameter_name: parameter_value},
+                params,
                 header_profile,
             )
             body = response.text
@@ -1289,9 +1563,13 @@ class JackeryDiagnosticsClient:
             return {
                 "method": "GET",
                 "endpoint": endpoint,
+                "probe_family": "extended_get",
                 "header_profile": header_profile,
+                "payload_variant": payload_variant,
                 "parameter_name": parameter_name,
                 "parameter_value": str(parameter_value),
+                "request_query": dict(params),
+                "request_query_hash": _hash_jsonable(params),
                 "http_status": response.status_code,
                 "body": body,
                 "body_hash": _response_hash(body),
@@ -1302,9 +1580,13 @@ class JackeryDiagnosticsClient:
             return {
                 "method": "GET",
                 "endpoint": endpoint,
+                "probe_family": "extended_get",
                 "header_profile": header_profile,
+                "payload_variant": payload_variant,
                 "parameter_name": parameter_name,
                 "parameter_value": str(parameter_value),
+                "request_query": dict(params),
+                "request_query_hash": _hash_jsonable(params),
                 "http_status": "ERROR",
                 "body": str(err),
                 "body_hash": _response_hash(str(err)),
@@ -1322,9 +1604,13 @@ class JackeryDiagnosticsClient:
             return {
                 "method": "GET",
                 "endpoint": endpoint,
+                "probe_family": "extended_get",
                 "header_profile": header_profile,
+                "payload_variant": payload_variant,
                 "parameter_name": parameter_name,
                 "parameter_value": str(parameter_value),
+                "request_query": dict(params),
+                "request_query_hash": _hash_jsonable(params),
                 "http_status": "ERROR",
                 "body": str(err),
                 "body_hash": _response_hash(str(err)),
@@ -1352,6 +1638,159 @@ class JackeryDiagnosticsClient:
             if value not in (None, ""):
                 identifiers.append((name, value))
         return identifiers
+
+    def _combined_identifier_values(
+        self, device: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any], str, str | int]]:
+        """Return combined identifier query/body shapes seen in mobile APIs."""
+        variants: list[tuple[str, dict[str, Any], str, str | int]] = []
+        raw = device.get("raw", {})
+        device_id = device.get("id")
+        device_sn = device.get("device_sn")
+        device_code = _device_value(raw, "deviceCode", "device_code")
+        if device_id not in (None, "") and device_sn not in (None, ""):
+            variants.extend(
+                (
+                    (
+                        "deviceId_deviceSn",
+                        {"deviceId": device_id, "deviceSn": device_sn},
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                    (
+                        "devId_devSn",
+                        {"devId": device_id, "devSn": device_sn},
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                    (
+                        "id_sn",
+                        {"id": device_id, "sn": device_sn},
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                    (
+                        "deviceId_deviceSn_page",
+                        {
+                            "deviceId": device_id,
+                            "deviceSn": device_sn,
+                            "pageNo": 1,
+                            "pageSize": 20,
+                        },
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                )
+            )
+        if device_id not in (None, ""):
+            variants.append(
+                (
+                    "deviceId_page",
+                    {"deviceId": device_id, "pageNo": 1, "pageSize": 20},
+                    "deviceId",
+                    device_id,
+                )
+            )
+        if device_code not in (None, "") and device_sn not in (None, ""):
+            variants.append(
+                (
+                    "deviceCode_deviceSn",
+                    {"deviceCode": device_code, "deviceSn": device_sn},
+                    "combined",
+                    "<multiple identifiers>",
+                )
+            )
+        return variants
+
+    def _extended_query_variants(
+        self, device: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any], str, str | int]]:
+        """Return GET query variants for read-only endpoint discovery."""
+        variants: list[tuple[str, dict[str, Any], str, str | int]] = [
+            (name, {name: value}, name, value)
+            for name, value in self._extended_identifier_values(device)
+        ]
+        variants.extend(self._combined_identifier_values(device))
+        return variants
+
+    def _targeted_property_query_variants(
+        self, device: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any], str, str | int]]:
+        """Return read-only 107/108 and code selector query variants."""
+        device_id = device.get("id")
+        device_sn = device.get("device_sn")
+        if device_id in (None, ""):
+            return []
+
+        selectors = ",".join(CHARGING_PLAN_PROPERTY_KEYS)
+        codes = ",".join(CHARGING_PLAN_CODE_TERMS)
+        variants: list[tuple[str, dict[str, Any], str, str | int]] = []
+        base_id_shapes: tuple[tuple[str, dict[str, Any]], ...] = (
+            ("deviceId", {"deviceId": device_id}),
+            ("devId", {"devId": device_id}),
+            ("id", {"id": device_id}),
+        )
+        if device_sn not in (None, ""):
+            base_id_shapes += (
+                (
+                    "deviceId_deviceSn",
+                    {"deviceId": device_id, "deviceSn": device_sn},
+                ),
+            )
+
+        for base_name, base_payload in base_id_shapes:
+            for key in CHARGING_PLAN_PROPERTY_KEYS:
+                variants.extend(
+                    (
+                        (
+                            f"{base_name}_property_{key}",
+                            {**base_payload, "property": key},
+                            "property",
+                            key,
+                        ),
+                        (
+                            f"{base_name}_propertyKey_{key}",
+                            {**base_payload, "propertyKey": key},
+                            "propertyKey",
+                            key,
+                        ),
+                        (
+                            f"{base_name}_dpId_{key}",
+                            {**base_payload, "dpId": key},
+                            "dpId",
+                            key,
+                        ),
+                    )
+                )
+            variants.extend(
+                (
+                    (
+                        f"{base_name}_keys_107_108",
+                        {**base_payload, "keys": selectors},
+                        "keys",
+                        selectors,
+                    ),
+                    (
+                        f"{base_name}_propertyKeys_107_108",
+                        {**base_payload, "propertyKeys": selectors},
+                        "propertyKeys",
+                        selectors,
+                    ),
+                    (
+                        f"{base_name}_dpIds_107_108",
+                        {**base_payload, "dpIds": selectors},
+                        "dpIds",
+                        selectors,
+                    ),
+                    (
+                        f"{base_name}_codes_terms",
+                        {**base_payload, "codes": codes},
+                        "codes",
+                        codes,
+                    ),
+                )
+            )
+        return variants
 
     def _post_identifier_values(
         self, device: dict[str, Any]
@@ -1484,20 +1923,45 @@ class JackeryDiagnosticsClient:
         return snapshots
 
     def _collect_extended_probes(self, device: dict[str, Any]) -> list[dict[str, Any]]:
-        """Run Android-header endpoint and identifier probes."""
+        """Run endpoint and identifier probes with app-like headers."""
         probes: list[dict[str, Any]] = []
-        identifiers = self._extended_identifier_values(device)
+        query_variants = self._extended_query_variants(device)
         for endpoint in EXTENDED_PROBE_ENDPOINTS:
-            for parameter_name, parameter_value in identifiers:
-                probes.append(
-                    self._probe_single_extended(
+            for payload_variant, params, parameter_name, parameter_value in query_variants:
+                for header_profile in EXTENDED_HEADER_PROFILES:
+                    probes.append(
+                        self._probe_single_extended(
+                            device,
+                            endpoint,
+                            params,
+                            parameter_name,
+                            parameter_value,
+                            header_profile,
+                            payload_variant,
+                        )
+                    )
+        return probes
+
+    def _collect_targeted_property_probes(
+        self, device: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Run 107/108-targeted read-only GET probes."""
+        probes: list[dict[str, Any]] = []
+        query_variants = self._targeted_property_query_variants(device)
+        for endpoint in TARGETED_PROPERTY_PROBE_ENDPOINTS:
+            for payload_variant, params, parameter_name, parameter_value in query_variants:
+                for header_profile in EXTENDED_HEADER_PROFILES:
+                    probe = self._probe_single_extended(
                         device,
                         endpoint,
+                        params,
                         parameter_name,
                         parameter_value,
-                        "android_apk_1_0_7",
+                        header_profile,
+                        payload_variant,
                     )
-                )
+                    probe["probe_family"] = "targeted_property_get"
+                    probes.append(probe)
         return probes
 
     def _probe_single_post_read(
@@ -1606,6 +2070,30 @@ class JackeryDiagnosticsClient:
                         )
         return probes
 
+    def _collect_targeted_property_post_probes(
+        self, device: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Probe safe POST property selectors for 107/108 and code aliases."""
+        probes: list[dict[str, Any]] = []
+        payload_variants = self._targeted_property_query_variants(device)
+        for endpoint in TARGETED_PROPERTY_PROBE_ENDPOINTS:
+            for payload_variant, payload, parameter_name, parameter_value in payload_variants:
+                for body_format in READ_ONLY_POST_BODY_FORMATS:
+                    for header_profile in READ_ONLY_POST_HEADER_PROFILES:
+                        probe = self._probe_single_post_read(
+                            device,
+                            endpoint,
+                            payload,
+                            parameter_name,
+                            parameter_value,
+                            header_profile,
+                            body_format,
+                            payload_variant,
+                        )
+                        probe["probe_family"] = "targeted_property_post"
+                        probes.append(probe)
+        return probes
+
     def _probe_method_discovery(
         self,
         device: dict[str, Any],
@@ -1681,6 +2169,113 @@ class JackeryDiagnosticsClient:
                             device,
                             endpoint,
                             method,
+                            header_profile,
+                        )
+                    )
+        return probes
+
+    def _path_identifier_values(
+        self, device: dict[str, Any]
+    ) -> dict[str, str | int | None]:
+        raw = device.get("raw", {})
+        return {
+            "device_id": device.get("id"),
+            "device_sn": device.get("device_sn"),
+            "device_code": _device_value(raw, "deviceCode", "device_code"),
+        }
+
+    def _probe_path_template(
+        self,
+        device: dict[str, Any],
+        endpoint_template: str,
+        identifier_name: str,
+        identifier_value: str | int,
+        header_profile: str,
+    ) -> dict[str, Any]:
+        """Run one read-only path-parameter probe."""
+        rendered_endpoint = endpoint_template.replace(
+            "{" + identifier_name + "}",
+            quote(str(identifier_value), safe=""),
+        )
+        try:
+            response = self._get_with_header_profile(
+                rendered_endpoint,
+                {},
+                header_profile,
+            )
+            body = response.text
+            interesting = is_interesting_response(response.status_code, body)
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "rendered_endpoint": rendered_endpoint,
+                "probe_family": "path_template_get",
+                "header_profile": header_profile,
+                "parameter_name": identifier_name,
+                "parameter_value": str(identifier_value),
+                "http_status": response.status_code,
+                "body": body,
+                "body_hash": _response_hash(body),
+                "interesting": interesting,
+                "error": False,
+            }
+        except JackeryDiagnosticsError as err:
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "rendered_endpoint": rendered_endpoint,
+                "probe_family": "path_template_get",
+                "header_profile": header_profile,
+                "parameter_name": identifier_name,
+                "parameter_value": str(identifier_value),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unexpected path-template probe error for %s via %s=%s on %s",
+                device["name"],
+                identifier_name,
+                identifier_value,
+                endpoint_template,
+            )
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "rendered_endpoint": rendered_endpoint,
+                "probe_family": "path_template_get",
+                "header_profile": header_profile,
+                "parameter_name": identifier_name,
+                "parameter_value": str(identifier_value),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+
+    def _collect_path_template_probes(
+        self, device: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Run read-only path-shaped endpoint probes."""
+        probes: list[dict[str, Any]] = []
+        identifier_values = self._path_identifier_values(device)
+        for endpoint in PATH_TEMPLATE_PROBE_ENDPOINTS:
+            for identifier_name, identifier_value in identifier_values.items():
+                if "{" + identifier_name + "}" not in endpoint:
+                    continue
+                if identifier_value in (None, ""):
+                    continue
+                for header_profile in EXTENDED_HEADER_PROFILES:
+                    probes.append(
+                        self._probe_path_template(
+                            device,
+                            endpoint,
+                            identifier_name,
+                            identifier_value,
                             header_profile,
                         )
                     )
@@ -1787,6 +2382,126 @@ class JackeryDiagnosticsClient:
                 )
         return probes
 
+    def _tuya_product_identifier_values(
+        self, device: dict[str, Any]
+    ) -> list[tuple[str, str | int]]:
+        """Return model/product-like identifiers for Tuya product schema probes."""
+        raw = device.get("raw", {})
+        values: list[tuple[str, str | int]] = []
+        for key in (
+            "productId",
+            "productKey",
+            "product_id",
+            "product_key",
+            "modelId",
+            "modelCode",
+            "devModel",
+            "modelName",
+        ):
+            value = _device_value(raw, key)
+            if value not in (None, ""):
+                values.append((key, value))
+
+        deduped: list[tuple[str, str | int]] = []
+        seen: set[str] = set()
+        for key, value in values:
+            marker = str(value)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            deduped.append((key, value))
+        return deduped
+
+    def _probe_tuya_product_path(
+        self,
+        device: dict[str, Any],
+        endpoint_template: str,
+        product_source: str,
+        product_value: str | int,
+    ) -> dict[str, Any]:
+        """Run one read-only Tuya product/schema path probe."""
+        rendered_endpoint = endpoint_template.replace(
+            "{product_id}",
+            quote(str(product_value), safe=""),
+        )
+        try:
+            response = self._get_with_header_profile(
+                rendered_endpoint,
+                {},
+                "android_apk_1_0_7",
+            )
+            body = response.text
+            interesting = is_interesting_response(response.status_code, body)
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "rendered_endpoint": rendered_endpoint,
+                "probe_family": "tuya_product_path",
+                "header_profile": "android_apk_1_0_7",
+                "parameter_name": product_source,
+                "parameter_value": str(product_value),
+                "http_status": response.status_code,
+                "body": body,
+                "body_hash": _response_hash(body),
+                "interesting": interesting,
+                "error": False,
+            }
+        except JackeryDiagnosticsError as err:
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "rendered_endpoint": rendered_endpoint,
+                "probe_family": "tuya_product_path",
+                "header_profile": "android_apk_1_0_7",
+                "parameter_name": product_source,
+                "parameter_value": str(product_value),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unexpected Tuya product probe error for %s via %s=%s on %s",
+                device["name"],
+                product_source,
+                product_value,
+                endpoint_template,
+            )
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "rendered_endpoint": rendered_endpoint,
+                "probe_family": "tuya_product_path",
+                "header_profile": "android_apk_1_0_7",
+                "parameter_name": product_source,
+                "parameter_value": str(product_value),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+
+    def _collect_tuya_product_probes(
+        self, device: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Run read-only probes against Tuya product schema-shaped paths."""
+        probes: list[dict[str, Any]] = []
+        identifiers = self._tuya_product_identifier_values(device)
+        for endpoint in TUYA_PRODUCT_PROBE_ENDPOINTS:
+            for product_source, product_value in identifiers:
+                probes.append(
+                    self._probe_tuya_product_path(
+                        device,
+                        endpoint,
+                        product_source,
+                        product_value,
+                    )
+                )
+        return probes
+
     def _supported_socketry_settings(
         self,
         properties: dict[str, Any],
@@ -1888,12 +2603,17 @@ class JackeryDiagnosticsClient:
         probes: list[dict[str, Any]],
         property_snapshots: list[dict[str, Any]],
         extended_probes: list[dict[str, Any]],
+        targeted_property_probes: list[dict[str, Any]],
         post_read_probes: list[dict[str, Any]],
+        targeted_property_post_probes: list[dict[str, Any]],
         method_discovery_probes: list[dict[str, Any]],
+        path_template_probes: list[dict[str, Any]],
         tuya_probes: list[dict[str, Any]],
+        tuya_product_probes: list[dict[str, Any]],
         socketry_metadata: dict[str, Any],
         mqtt_capture: dict[str, Any],
         tuya_fingerprint: dict[str, Any],
+        tuya_schema_catalog: dict[str, Any],
     ) -> dict[str, Any]:
         """Summarize evidence for the three charging-plan entities."""
         property_keys_by_profile = {
@@ -1909,9 +2629,13 @@ class JackeryDiagnosticsClient:
         all_probes = [
             *probes,
             *extended_probes,
+            *targeted_property_probes,
             *post_read_probes,
+            *targeted_property_post_probes,
             *method_discovery_probes,
+            *path_template_probes,
             *tuya_probes,
+            *tuya_product_probes,
         ]
         candidate_probes = [
             {
@@ -1993,10 +2717,32 @@ class JackeryDiagnosticsClient:
             "post_read_interesting_count": _interesting_probe_count(
                 {"post_read_probes": post_read_probes}, "post_read_probes"
             ),
+            "targeted_property_probe_count": len(targeted_property_probes),
+            "targeted_property_interesting_count": _interesting_probe_count(
+                {"targeted_property_probes": targeted_property_probes},
+                "targeted_property_probes",
+            ),
+            "targeted_property_post_probe_count": len(
+                targeted_property_post_probes
+            ),
+            "targeted_property_post_interesting_count": _interesting_probe_count(
+                {"targeted_property_post_probes": targeted_property_post_probes},
+                "targeted_property_post_probes",
+            ),
             "method_discovery_probe_count": len(method_discovery_probes),
             "method_discovery_interesting_count": _interesting_probe_count(
                 {"method_discovery_probes": method_discovery_probes},
                 "method_discovery_probes",
+            ),
+            "path_template_probe_count": len(path_template_probes),
+            "path_template_interesting_count": _interesting_probe_count(
+                {"path_template_probes": path_template_probes},
+                "path_template_probes",
+            ),
+            "tuya_product_probe_count": len(tuya_product_probes),
+            "tuya_product_interesting_count": _interesting_probe_count(
+                {"tuya_product_probes": tuya_product_probes},
+                "tuya_product_probes",
             ),
             "mqtt_message_count": len(mqtt_messages),
             "mqtt_candidate_messages": mqtt_candidate_messages[:25],
@@ -2012,6 +2758,12 @@ class JackeryDiagnosticsClient:
                     "detected_charging_plan_terms", []
                 ),
                 "tuya_probe_count": tuya_fingerprint.get("tuya_probe_count", 0),
+            },
+            "tuya_schema_catalog_summary": {
+                "entry_count": tuya_schema_catalog.get("entry_count", 0),
+                "charging_plan_candidate_count": tuya_schema_catalog.get(
+                    "charging_plan_candidate_count", 0
+                ),
             },
             "diagnosis_hint": (
                 "If 107 and 108 are false everywhere and Socketry has no "
@@ -2057,20 +2809,35 @@ class JackeryDiagnosticsClient:
                     snapshot_properties = snapshot["properties"]
                     break
             extended_probes = self._collect_extended_probes(device)
+            targeted_property_probes = self._collect_targeted_property_probes(device)
             post_read_probes = self._collect_post_read_probes(device)
+            targeted_property_post_probes = (
+                self._collect_targeted_property_post_probes(device)
+            )
             method_discovery_probes = self._collect_method_discovery_probes(device)
+            path_template_probes = self._collect_path_template_probes(device)
             tuya_probes = self._collect_tuya_path_probes(device)
+            tuya_product_probes = self._collect_tuya_product_probes(device)
             socketry_metadata = self._supported_socketry_settings(
                 snapshot_properties
             )
             all_device_probes = [
                 *probes,
                 *extended_probes,
+                *targeted_property_probes,
                 *post_read_probes,
+                *targeted_property_post_probes,
                 *method_discovery_probes,
+                *path_template_probes,
                 *tuya_probes,
+                *tuya_product_probes,
             ]
             tuya_fingerprint = build_tuya_fingerprint(
+                device,
+                all_device_probes,
+                property_snapshots,
+            )
+            tuya_schema_catalog = build_tuya_schema_catalog(
                 device,
                 all_device_probes,
                 property_snapshots,
@@ -2081,18 +2848,24 @@ class JackeryDiagnosticsClient:
                 probes,
                 property_snapshots,
                 extended_probes,
+                targeted_property_probes,
                 post_read_probes,
+                targeted_property_post_probes,
                 method_discovery_probes,
+                path_template_probes,
                 tuya_probes,
+                tuya_product_probes,
                 socketry_metadata,
                 mqtt_capture,
                 tuya_fingerprint,
+                tuya_schema_catalog,
             )
             implementation_readiness = build_implementation_readiness(
                 charging_plan_analysis,
                 tuya_fingerprint,
                 response_catalog,
                 socketry_metadata,
+                tuya_schema_catalog,
             )
 
             device_results.append(
@@ -2104,10 +2877,15 @@ class JackeryDiagnosticsClient:
                     "probes": probes,
                     "property_snapshots": property_snapshots,
                     "extended_probes": extended_probes,
+                    "targeted_property_probes": targeted_property_probes,
                     "post_read_probes": post_read_probes,
+                    "targeted_property_post_probes": targeted_property_post_probes,
                     "method_discovery_probes": method_discovery_probes,
+                    "path_template_probes": path_template_probes,
                     "tuya_probes": tuya_probes,
+                    "tuya_product_probes": tuya_product_probes,
                     "tuya_fingerprint": tuya_fingerprint,
+                    "tuya_schema_catalog": tuya_schema_catalog,
                     "response_catalog": response_catalog,
                     "socketry_device_metadata": socketry_metadata,
                     "charging_plan_analysis": charging_plan_analysis,
@@ -2149,6 +2927,65 @@ def _properties_from_result_device(device: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+_PROBE_DIFF_KEYS = (
+    "probes",
+    "extended_probes",
+    "targeted_property_probes",
+    "post_read_probes",
+    "targeted_property_post_probes",
+    "method_discovery_probes",
+    "path_template_probes",
+    "tuya_probes",
+    "tuya_product_probes",
+)
+
+
+def _probe_diff_signature(probe: dict[str, Any]) -> str:
+    parts = [
+        str(probe.get("method", "GET")),
+        str(probe.get("probe_family") or ""),
+        str(probe.get("endpoint") or ""),
+        str(probe.get("header_profile") or ""),
+        str(probe.get("body_format") or ""),
+        str(probe.get("payload_variant") or ""),
+        str(probe.get("parameter_name") or ""),
+        str(probe.get("request_body_hash") or ""),
+        str(probe.get("request_query_hash") or ""),
+    ]
+    return "|".join(parts)
+
+
+def _probe_diff_summary(probe: dict[str, Any]) -> dict[str, Any]:
+    body = str(probe.get("body", ""))
+    return {
+        "method": probe.get("method", "GET"),
+        "probe_family": probe.get("probe_family"),
+        "endpoint": probe.get("endpoint"),
+        "header_profile": probe.get("header_profile"),
+        "body_format": probe.get("body_format"),
+        "payload_variant": probe.get("payload_variant"),
+        "parameter_name": probe.get("parameter_name"),
+        "http_status": probe.get("http_status"),
+        "body_hash": probe.get("body_hash") or _response_hash(body),
+        "shape": _response_json_shape(body),
+        "charging_plan_terms": _find_charging_plan_terms(body),
+        "interesting": probe.get("interesting"),
+    }
+
+
+def _probe_map_for_diff(device: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    probe_map: dict[str, dict[str, Any]] = {}
+    for key in _PROBE_DIFF_KEYS:
+        probes = device.get(key, [])
+        if not isinstance(probes, list):
+            continue
+        for probe in probes:
+            if not isinstance(probe, dict):
+                continue
+            probe_map[_probe_diff_signature(probe)] = _probe_diff_summary(probe)
+    return probe_map
+
+
 def compare_probe_results(
     previous: dict[str, Any] | None,
     current: dict[str, Any],
@@ -2161,6 +2998,7 @@ def compare_probe_results(
         _device_identity(device): device for device in previous.get("devices", [])
     }
     property_changes: list[dict[str, Any]] = []
+    probe_response_changes: list[dict[str, Any]] = []
     for current_device in current.get("devices", []):
         identity = _device_identity(current_device)
         previous_device = previous_devices.get(identity)
@@ -2169,9 +3007,6 @@ def compare_probe_results(
 
         previous_properties = _properties_from_result_device(previous_device)
         current_properties = _properties_from_result_device(current_device)
-        if not previous_properties and not current_properties:
-            continue
-
         previous_keys = set(previous_properties)
         current_keys = set(current_properties)
         changed = {
@@ -2201,10 +3036,50 @@ def compare_probe_results(
                 }
             )
 
+        previous_probe_map = _probe_map_for_diff(previous_device)
+        current_probe_map = _probe_map_for_diff(current_device)
+        probe_added = sorted(set(current_probe_map) - set(previous_probe_map))
+        probe_removed = sorted(set(previous_probe_map) - set(current_probe_map))
+        probe_changed = [
+            key
+            for key in sorted(set(previous_probe_map) & set(current_probe_map))
+            if previous_probe_map[key].get("body_hash")
+            != current_probe_map[key].get("body_hash")
+            or previous_probe_map[key].get("http_status")
+            != current_probe_map[key].get("http_status")
+        ]
+        if probe_added or probe_removed or probe_changed:
+            probe_response_changes.append(
+                {
+                    "device": current_device.get("name"),
+                    "device_id": str(current_device.get("id")),
+                    "device_sn": str(current_device.get("device_sn")),
+                    "added_count": len(probe_added),
+                    "removed_count": len(probe_removed),
+                    "changed_count": len(probe_changed),
+                    "changed": [
+                        {
+                            "before": previous_probe_map[key],
+                            "after": current_probe_map[key],
+                        }
+                        for key in probe_changed[:50]
+                    ],
+                    "added": [
+                        current_probe_map[key]
+                        for key in probe_added[:25]
+                    ],
+                    "removed": [
+                        previous_probe_map[key]
+                        for key in probe_removed[:25]
+                    ],
+                }
+            )
+
     return {
         "previous_generated_at": previous.get("generated_at"),
         "current_generated_at": current.get("generated_at"),
         "property_changes": property_changes,
+        "probe_response_changes": probe_response_changes,
     }
 
 

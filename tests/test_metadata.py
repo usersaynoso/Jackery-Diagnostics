@@ -38,7 +38,7 @@ class MetadataTests(unittest.TestCase):
             self.manifest["requirements"],
             ["pycryptodomex>=3.9.0", "socketry>=0.2.4"],
         )
-        self.assertEqual(self.manifest["version"], "1.6")
+        self.assertEqual(self.manifest["version"], "1.7")
         self.assertEqual(self.manifest["iot_class"], "cloud_polling")
         self.assertTrue(self.manifest["config_flow"])
 
@@ -49,7 +49,7 @@ class MetadataTests(unittest.TestCase):
     def test_readme_covers_hacs_install_and_notification_flow(self) -> None:
         self.assertIn("Custom repositories", self.readme)
         self.assertIn("Settings > Devices & Services > Integrations", self.readme)
-        self.assertIn("wait about 60 seconds", self.readme.lower())
+        self.assertIn("wait several minutes", self.readme.lower())
         self.assertIn("Download diagnostics", self.readme)
         self.assertIn("disable the normal Jackery Home Assistant integration", self.readme)
         self.assertIn("/config/jackery_diagnostics_results.json", self.readme)
@@ -58,7 +58,11 @@ class MetadataTests(unittest.TestCase):
         self.assertIn("implementation_readiness", self.readme)
         self.assertIn("response_catalog", self.readme)
         self.assertIn("method_discovery_probes", self.readme)
+        self.assertIn("targeted_property_probes", self.readme)
+        self.assertIn("path_template_probes", self.readme)
         self.assertIn("tuya_fingerprint", self.readme)
+        self.assertIn("tuya_schema_catalog", self.readme)
+        self.assertIn("tuya_product_probes", self.readme)
         self.assertIn("read-only `POST`", self.readme)
         self.assertIn("Socketry", self.readme)
 

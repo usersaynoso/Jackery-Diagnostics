@@ -154,6 +154,25 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                         },
                         "custom_components": ["other_integration"],
                         "generated_at": "2026-05-23T12:00:00+00:00",
+                        "previous_result_diff": {
+                            "previous_generated_at": "older",
+                            "current_generated_at": "newer",
+                            "property_changes": [],
+                            "probe_response_changes": [
+                                {
+                                    "device": "Explorer",
+                                    "changed_count": 1,
+                                    "changed": [
+                                        {
+                                            "after": {
+                                                "endpoint": "/v1/device/chargePlan",
+                                                "body_hash": "abc",
+                                            }
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
                         "socketry_protocol_catalog": {
                             "available": True,
                             "source_scans": [
@@ -193,6 +212,16 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         }
                                     ],
                                 },
+                                "tuya_schema_catalog": {
+                                    "entry_count": 1,
+                                    "charging_plan_candidate_count": 1,
+                                    "charging_plan_candidates": [
+                                        {
+                                            "code": "charge_plan",
+                                            "schema_id": "107",
+                                        }
+                                    ],
+                                },
                                 "property_snapshots": [
                                     {
                                         "endpoint": "/v1/device/property",
@@ -220,6 +249,21 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         ),
                                     }
                                 ],
+                                "targeted_property_probes": [
+                                    {
+                                        "method": "GET",
+                                        "endpoint": "/v1/device/property",
+                                        "probe_family": "targeted_property_get",
+                                        "payload_variant": "deviceId_keys_107_108",
+                                        "parameter_name": "keys",
+                                        "parameter_value": "107,108",
+                                        "request_query": {
+                                            "deviceId": 123,
+                                            "keys": "107,108",
+                                        },
+                                        "body": "{}",
+                                    }
+                                ],
                                 "post_read_probes": [
                                     {
                                         "method": "POST",
@@ -235,6 +279,22 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         ),
                                     }
                                 ],
+                                "targeted_property_post_probes": [
+                                    {
+                                        "method": "POST",
+                                        "endpoint": "/v1/device/schema",
+                                        "probe_family": "targeted_property_post",
+                                        "body_format": "json",
+                                        "payload_variant": "deviceId_codes_terms",
+                                        "parameter_name": "codes",
+                                        "parameter_value": "charge_plan",
+                                        "request_body": {
+                                            "deviceId": 123,
+                                            "codes": "charge_plan",
+                                        },
+                                        "body": "{}",
+                                    }
+                                ],
                                 "method_discovery_probes": [
                                     {
                                         "method": "OPTIONS",
@@ -245,6 +305,16 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         "allow": "GET, POST, OPTIONS",
                                         "body": "",
                                         "interesting": True,
+                                    }
+                                ],
+                                "path_template_probes": [
+                                    {
+                                        "method": "GET",
+                                        "endpoint": "/v1/device/{device_id}/schema",
+                                        "probe_family": "path_template_get",
+                                        "parameter_name": "device_id",
+                                        "parameter_value": 123,
+                                        "body": "{}",
                                     }
                                 ],
                                 "response_catalog": {
@@ -258,6 +328,16 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         "parameter_value": 123,
                                         "body": json.dumps(
                                             {"data": {"devId": "SN123"}}
+                                        ),
+                                    }
+                                ],
+                                "tuya_product_probes": [
+                                    {
+                                        "endpoint": "/v1.0/products/{product_id}/schema",
+                                        "parameter_name": "productKey",
+                                        "parameter_value": "product-secret",
+                                        "body": json.dumps(
+                                            {"data": {"productKey": "product-secret"}}
                                         ),
                                     }
                                 ],
@@ -287,7 +367,14 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(device["implementation_readiness"]["ready_to_add_entities"])
         self.assertEqual(device["response_catalog"]["unique_body_hash_count"], 1)
+        self.assertEqual(device["tuya_schema_catalog"]["entry_count"], 1)
         self.assertTrue(device["tuya_fingerprint"]["has_tuya_schema_evidence"])
+        self.assertEqual(
+            result["probe"]["previous_result_diff"]["probe_response_changes"][0][
+                "changed_count"
+            ],
+            1,
+        )
         self.assertEqual(
             device["tuya_fingerprint"]["field_hits"][0]["value_preview"],
             "**REDACTED**",
@@ -302,6 +389,22 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             device["post_read_probes"][0]["request_body"]["deviceId"],
+            "**REDACTED**",
+        )
+        self.assertEqual(
+            device["targeted_property_probes"][0]["request_query"]["deviceId"],
+            "**REDACTED**",
+        )
+        self.assertEqual(
+            device["targeted_property_post_probes"][0]["request_body"]["deviceId"],
+            "**REDACTED**",
+        )
+        self.assertEqual(
+            device["path_template_probes"][0]["parameter_value"],
+            "**REDACTED**",
+        )
+        self.assertEqual(
+            device["tuya_product_probes"][0]["parameter_value"],
             "**REDACTED**",
         )
         self.assertEqual(

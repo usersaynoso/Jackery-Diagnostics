@@ -29,6 +29,8 @@ TO_REDACT = {
     "mqttPassWord",
     "nickname",
     "password",
+    "productId",
+    "productKey",
     "sn",
     "token",
     "uid",
@@ -44,6 +46,8 @@ SENSITIVE_PARAMETER_NAMES = {
     "devsn",
     "id",
     "localkey",
+    "productid",
+    "productkey",
     "sn",
     "uid",
     "uuid",
@@ -198,6 +202,7 @@ def _scope_previous_diff(diff: Any) -> dict[str, Any] | None:
         "previous_generated_at": diff.get("previous_generated_at"),
         "current_generated_at": diff.get("current_generated_at"),
         "property_changes": diff.get("property_changes", []),
+        "probe_response_changes": diff.get("probe_response_changes", []),
     }
 
 
@@ -211,13 +216,18 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
         "model": {
             "modelCode": raw.get("modelCode"),
             "modelName": raw.get("modelName"),
+            "modelId": raw.get("modelId"),
             "devModel": raw.get("devModel"),
             "deviceName": raw.get("deviceName"),
             "devName": raw.get("devName"),
+            "onlineStatus": raw.get("onlineStatus"),
+            "timezoneOffset": raw.get("timezoneOffset"),
         },
+        "raw_key_catalog": sorted(str(key) for key in raw),
         "charging_plan_analysis": device.get("charging_plan_analysis"),
         "implementation_readiness": device.get("implementation_readiness"),
         "tuya_fingerprint": device.get("tuya_fingerprint"),
+        "tuya_schema_catalog": device.get("tuya_schema_catalog"),
         "response_catalog": device.get("response_catalog"),
         "property_snapshots": [
             _scope_property_snapshot(snapshot)
@@ -232,14 +242,29 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
             for probe in [
                 *device.get("probes", []),
                 *device.get("extended_probes", []),
+                *device.get("targeted_property_probes", []),
                 *device.get("post_read_probes", []),
+                *device.get("targeted_property_post_probes", []),
                 *device.get("method_discovery_probes", []),
+                *device.get("path_template_probes", []),
+                *device.get("tuya_probes", []),
+                *device.get("tuya_product_probes", []),
             ]
             if isinstance(probe, dict) and probe.get("interesting")
+        ],
+        "targeted_property_probes": [
+            _scope_probe(probe)
+            for probe in device.get("targeted_property_probes", [])
+            if isinstance(probe, dict)
         ],
         "post_read_probes": [
             _scope_probe(probe)
             for probe in device.get("post_read_probes", [])
+            if isinstance(probe, dict)
+        ],
+        "targeted_property_post_probes": [
+            _scope_probe(probe)
+            for probe in device.get("targeted_property_post_probes", [])
             if isinstance(probe, dict)
         ],
         "method_discovery_probes": [
@@ -247,9 +272,19 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
             for probe in device.get("method_discovery_probes", [])
             if isinstance(probe, dict)
         ],
+        "path_template_probes": [
+            _scope_probe(probe)
+            for probe in device.get("path_template_probes", [])
+            if isinstance(probe, dict)
+        ],
         "tuya_probes": [
             _scope_probe(probe)
             for probe in device.get("tuya_probes", [])
+            if isinstance(probe, dict)
+        ],
+        "tuya_product_probes": [
+            _scope_probe(probe)
+            for probe in device.get("tuya_product_probes", [])
             if isinstance(probe, dict)
         ],
     }
@@ -296,6 +331,8 @@ def _scope_probe(probe: dict[str, Any]) -> dict[str, Any]:
         "parameter_value": probe.get("parameter_value"),
         "request_body": probe.get("request_body"),
         "request_body_hash": probe.get("request_body_hash"),
+        "request_query": probe.get("request_query"),
+        "request_query_hash": probe.get("request_query_hash"),
         "http_status": probe.get("http_status"),
         "allow": probe.get("allow"),
         "body_hash": probe.get("body_hash"),

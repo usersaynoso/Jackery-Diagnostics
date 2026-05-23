@@ -38,7 +38,7 @@ class MetadataTests(unittest.TestCase):
             self.manifest["requirements"],
             ["pycryptodomex>=3.9.0", "socketry>=0.2.4"],
         )
-        self.assertEqual(self.manifest["version"], "1.8")
+        self.assertEqual(self.manifest["version"], "1.9")
         self.assertEqual(self.manifest["iot_class"], "cloud_polling")
         self.assertTrue(self.manifest["config_flow"])
 

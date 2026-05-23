@@ -42,10 +42,10 @@ Before running the probe, disable the normal Jackery Home Assistant integration 
 1. Open `Settings > Devices & Services > Integrations`.
 2. Add `Jackery Diagnostics`.
 3. Enter the same email address and password you use in the Jackery app.
-4. The integration immediately overwrites `/config/jackery_diagnostics_results.json` with a fresh `run_status` object so old diagnostics are not mistaken for the current run.
+4. The integration tracks the current probe with a fresh `run_status` object while preserving the previous full results file until the new exhaustive probe finishes.
 5. Wait several minutes or longer for the Home Assistant notification named `Jackery Diagnostics Results`; the exhaustive probe can take a long time because it checks many endpoint, identifier, method, and body-shape combinations.
 6. On the Jackery Diagnostics integration page, click the three-dot menu and choose `Download diagnostics`.
-7. Confirm `data.probe.run_status.status` is `completed` and `data.probe.generated_at` is from the current run. If it says `running` or `failed`, attach that diagnostics file plus the Home Assistant log lines for `jackery_diagnostics`.
+7. Confirm `data.probe.run_status.status` is `completed` and `data.probe.generated_at` is from the current run. If it says `failed` or `cancelled`, attach that diagnostics file plus the Home Assistant log lines for `jackery_diagnostics`.
 8. Attach the downloaded diagnostics file to the GitHub issue after checking that account details, tokens, and serial numbers are redacted.
 
 The credentials are used only to authenticate with the Jackery cloud and run the diagnostic probe.
@@ -55,7 +55,7 @@ The credentials are used only to authenticate with the Jackery cloud and run the
 - Persistent notification in Home Assistant with readable per-endpoint results
 - Full untruncated JSON output at `/config/jackery_diagnostics_results.json`
 - Home Assistant `Download diagnostics` support from the integration's three-dot menu. The integration-owned `data` section is scoped to Jackery charging-plan evidence only. Home Assistant may still wrap that `data` section with top-level environment metadata such as `home_assistant`, `custom_components`, `integration_manifest`, `setup_times`, and `issues`.
-- `run_status` with the installed diagnostics plugin version, started/finished timestamps, current phase, task state, and any probe failure. This is written at run start and updated on completion or failure so stale files are visible.
+- `run_status` with the installed diagnostics plugin version, started/finished timestamps, current phase, task state, and any probe failure. `Download diagnostics` waits for the active probe task before reading the completed results file.
 - `property_snapshots` per device for before/after comparisons
 - `previous_result_diff` after the second and later runs, including both property changes and probe response hash/status changes
 - `socketry_protocol_catalog` with known writable property IDs, action IDs, value labels, and MQTT command payload shape

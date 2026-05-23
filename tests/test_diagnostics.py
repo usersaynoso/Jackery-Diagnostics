@@ -103,7 +103,7 @@ def _install_common_stubs(stubbed_modules: dict[str, object]) -> None:
 
     const_mod = types.ModuleType(f"{TEST_PACKAGE}.const")
     const_mod.DOMAIN = "jackery_diagnostics"
-    const_mod.INTEGRATION_VERSION = "1.8"
+    const_mod.INTEGRATION_VERSION = "1.9"
     const_mod.RESULTS_PATH = Path("/tmp/placeholder.json")
     _install_stub_module(stubbed_modules, f"{TEST_PACKAGE}.const", const_mod)
 
@@ -156,13 +156,13 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                         },
                         "custom_components": ["other_integration"],
                         "generated_at": "2026-05-23T12:00:00+00:00",
-                        "diagnostics_plugin_version": "1.8",
+                        "diagnostics_plugin_version": "1.9",
                         "run_status": {
                             "status": "completed",
                             "phase": "probe_completed",
                             "started_at": "2026-05-23T11:55:00+00:00",
                             "finished_at": "2026-05-23T12:00:00+00:00",
-                            "plugin_version": "1.8",
+                            "plugin_version": "1.9",
                         },
                         "previous_result_diff": {
                             "previous_generated_at": "older",
@@ -361,13 +361,13 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             result = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 
         self.assertEqual(result["source"], "jackery_diagnostics")
-        self.assertEqual(result["diagnostics_plugin_version"], "1.8")
+        self.assertEqual(result["diagnostics_plugin_version"], "1.9")
         self.assertNotIn("entry", result)
         self.assertNotIn("probe_task", result)
         self.assertNotIn("content", result["result_file"])
         self.assertIn("modified_at", result["result_file"])
         self.assertEqual(result["probe"]["generated_at"], "2026-05-23T12:00:00+00:00")
-        self.assertEqual(result["probe"]["diagnostics_plugin_version"], "1.8")
+        self.assertEqual(result["probe"]["diagnostics_plugin_version"], "1.9")
         self.assertEqual(result["probe"]["run_status"]["status"], "completed")
         self.assertEqual(
             result["probe"]["run_status"]["runtime"]["task_status"],
@@ -449,39 +449,94 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["result_file"]["exists"])
         self.assertIsNone(result["probe"])
 
-    async def test_diagnostics_download_reports_running_task_without_result_file(
+    async def test_diagnostics_download_waits_for_running_task_and_rereads_file(
+        self,
+    ) -> None:
+        hass = FakeHass()
+        entry = ConfigEntry("entry-1", {})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics.RESULTS_PATH = Path(tmpdir) / "jackery_diagnostics_results.json"
+
+            async def finish_probe() -> None:
+                await asyncio.sleep(0.01)
+                diagnostics.RESULTS_PATH.write_text(
+                    json.dumps(
+                        {
+                            "generated_at": "2026-05-23T12:05:00+00:00",
+                            "diagnostics_plugin_version": "1.9",
+                            "run_status": {
+                                "status": "completed",
+                                "phase": "probe_completed",
+                                "started_at": "2026-05-23T12:00:00+00:00",
+                                "finished_at": "2026-05-23T12:05:00+00:00",
+                                "plugin_version": "1.9",
+                            },
+                            "fatal_error": None,
+                            "discovery": {"http_status": 200},
+                            "socketry_protocol_catalog": {},
+                            "socketry_mqtt_capture": {},
+                            "devices": [{"name": "fresh", "raw": {}}],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            task = asyncio.create_task(finish_probe())
+            hass.data["jackery_diagnostics"]["entry-1"] = {
+                "status": "running",
+                "phase": "probe_running",
+                "started_at": "2026-05-23T12:00:00+00:00",
+                "plugin_version": "1.9",
+                "task": task,
+            }
+
+            result = await diagnostics.async_get_config_entry_diagnostics(
+                hass,
+                entry,
+            )
+
+        self.assertTrue(result["result_file"]["exists"])
+        self.assertEqual(result["probe"]["generated_at"], "2026-05-23T12:05:00+00:00")
+        self.assertEqual(result["probe"]["run_status"]["status"], "completed")
+        self.assertEqual(result["probe"]["device_count"], 1)
+        self.assertEqual(result["probe"]["devices"][0]["name"], "fresh")
+        self.assertEqual(
+            result["probe"]["run_status"]["runtime"]["task_status"],
+            "completed",
+        )
+
+    async def test_diagnostics_download_reports_cancelled_task_without_result_file(
         self,
     ) -> None:
         hass = FakeHass()
         entry = ConfigEntry("entry-1", {})
         task = asyncio.create_task(asyncio.sleep(60))
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
         hass.data["jackery_diagnostics"]["entry-1"] = {
             "status": "running",
             "phase": "probe_running",
             "started_at": "2026-05-23T12:00:00+00:00",
-            "plugin_version": "1.8",
+            "plugin_version": "1.9",
             "task": task,
         }
 
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                diagnostics.RESULTS_PATH = Path(tmpdir) / "missing.json"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diagnostics.RESULTS_PATH = Path(tmpdir) / "missing.json"
 
-                result = await diagnostics.async_get_config_entry_diagnostics(
-                    hass,
-                    entry,
-                )
-
-            self.assertFalse(result["result_file"]["exists"])
-            self.assertEqual(result["probe"]["run_status"]["status"], "running")
-            self.assertEqual(
-                result["probe"]["run_status"]["task_status"],
-                "running",
+            result = await diagnostics.async_get_config_entry_diagnostics(
+                hass,
+                entry,
             )
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+
+        self.assertFalse(result["result_file"]["exists"])
+        self.assertEqual(result["probe"]["run_status"]["status"], "cancelled")
+        self.assertEqual(
+            result["probe"]["run_status"]["task_status"],
+            "cancelled",
+        )
 
 
 if __name__ == "__main__":

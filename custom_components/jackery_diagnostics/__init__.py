@@ -65,15 +65,6 @@ async def _async_run_probe(
     """Run the blocking probe in the executor and surface the results."""
     previous_result = await hass.async_add_executor_job(_read_results_file)
     run_state.update({"status": "running", "phase": "probe_running"})
-    await hass.async_add_executor_job(
-        _write_results_file,
-        _build_status_result(
-            entry,
-            run_state,
-            previous_result,
-            fatal_error=None,
-        ),
-    )
 
     try:
         result = await hass.async_add_executor_job(

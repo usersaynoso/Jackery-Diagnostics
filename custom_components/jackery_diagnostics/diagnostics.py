@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -60,6 +61,7 @@ async def async_get_config_entry_diagnostics(
     entry: ConfigEntry,
 ) -> dict[str, Any]:
     """Return diagnostic data for Home Assistant's download diagnostics action."""
+    await _async_wait_for_probe_if_running(hass, entry)
     result_file = await hass.async_add_executor_job(_read_results_file)
     runtime_status = _runtime_probe_status(hass, entry)
     return _redact_download_data(
@@ -172,11 +174,11 @@ def _runtime_probe_status(
     entry: ConfigEntry,
 ) -> dict[str, Any] | None:
     """Return current in-memory probe task status when available."""
-    stored = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    stored = _stored_probe_state(hass, entry)
     if stored is None:
         return None
 
-    task = None
+    task = _probe_task_from_stored_state(stored)
     status: dict[str, Any] = {}
     if isinstance(stored, dict):
         status = {
@@ -184,9 +186,6 @@ def _runtime_probe_status(
             for key, value in stored.items()
             if key != "task"
         }
-        task = stored.get("task")
-    else:
-        task = stored
 
     if task is None:
         return status or None
@@ -202,13 +201,49 @@ def _runtime_probe_status(
             task_status = "failed"
             task_error = f"{exception.__class__.__name__}: {exception}"
 
-    if not status.get("status"):
+    if (
+        not status.get("status")
+        or status.get("status") in {"starting", "running"}
+        or task_status in {"failed", "cancelled"}
+    ):
         status["status"] = task_status
     status["task_status"] = task_status
     status["task_done"] = task_done
     if task_error and not status.get("error"):
         status["error"] = task_error
     return status
+
+
+async def _async_wait_for_probe_if_running(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Wait for the active probe so downloads return the completed result."""
+    task = _probe_task_from_stored_state(_stored_probe_state(hass, entry))
+    if task is None or task.done():
+        return
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+
+
+def _stored_probe_state(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> Any:
+    return hass.data.get(DOMAIN, {}).get(entry.entry_id)
+
+
+def _probe_task_from_stored_state(stored: Any) -> asyncio.Task | None:
+    if isinstance(stored, dict):
+        task = stored.get("task")
+    else:
+        task = stored
+    return task if isinstance(task, asyncio.Task) else None
 
 
 def _scope_run_status(

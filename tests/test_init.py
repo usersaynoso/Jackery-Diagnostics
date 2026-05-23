@@ -108,7 +108,7 @@ def _install_common_stubs(stubbed_modules: dict[str, object]) -> None:
 
     const_mod = types.ModuleType(f"{TEST_PACKAGE}.const")
     const_mod.DOMAIN = "jackery_diagnostics"
-    const_mod.INTEGRATION_VERSION = "1.8"
+    const_mod.INTEGRATION_VERSION = "1.9"
     const_mod.NOTIFICATION_ID = "jackery_diagnostics_results"
     const_mod.NOTIFICATION_TITLE = "Jackery Diagnostics Results"
     const_mod.RESULTS_PATH = Path("/tmp/placeholder.json")
@@ -191,11 +191,11 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
 
             persisted = json.loads(integration.RESULTS_PATH.read_text(encoding="utf-8"))
             self.assertEqual(persisted["account"], "dev@example.com")
-            self.assertEqual(persisted["diagnostics_plugin_version"], "1.8")
+            self.assertEqual(persisted["diagnostics_plugin_version"], "1.9")
             self.assertEqual(persisted["run_status"]["status"], "completed")
-            self.assertEqual(persisted["run_status"]["plugin_version"], "1.8")
+            self.assertEqual(persisted["run_status"]["plugin_version"], "1.9")
 
-    async def test_setup_entry_overwrites_stale_results_while_probe_runs(
+    async def test_setup_entry_preserves_previous_results_while_probe_runs(
         self,
     ) -> None:
         hass = FakeHass()
@@ -236,25 +236,32 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
                 setup_ok = await integration.async_setup_entry(hass, entry)
                 self.assertTrue(setup_ok)
 
+                run_state = hass.data["jackery_diagnostics"]["entry-1"]
                 for _ in range(100):
-                    persisted = json.loads(
-                        integration.RESULTS_PATH.read_text(encoding="utf-8")
-                    )
-                    if persisted.get("run_status", {}).get("status") == "running":
+                    if run_state.get("status") == "running":
                         break
                     await asyncio.sleep(0.01)
                 else:
-                    self.fail("Probe did not write running status")
+                    self.fail("Probe did not enter running status")
 
-                self.assertEqual(persisted["devices"], [])
-                self.assertEqual(persisted["run_status"]["phase"], "probe_running")
-                self.assertEqual(
-                    persisted["previous_result_diff"]["previous_generated_at"],
-                    "2026-04-20T09:00:00+00:00",
+                persisted = json.loads(
+                    integration.RESULTS_PATH.read_text(encoding="utf-8")
                 )
+                self.assertEqual(persisted["generated_at"], "2026-04-20T09:00:00+00:00")
+                self.assertEqual(persisted["devices"], [{"name": "stale"}])
 
                 release_probe.set()
-                await hass.data["jackery_diagnostics"]["entry-1"]["task"]
+                await run_state["task"]
+
+                completed = json.loads(
+                    integration.RESULTS_PATH.read_text(encoding="utf-8")
+                )
+                self.assertEqual(completed["diagnostics_plugin_version"], "1.9")
+                self.assertEqual(completed["run_status"]["status"], "completed")
+                self.assertEqual(
+                    completed["previous_result_diff"]["property_changes"],
+                    [],
+                )
         finally:
             integration.run_diagnostic_probe = original_probe
 

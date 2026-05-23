@@ -26,13 +26,17 @@ The integration:
 5. Install `Jackery Diagnostics`.
 6. Restart Home Assistant.
 
-## Configure
+## Run diagnostics
+
+Before running the probe, disable the normal Jackery Home Assistant integration and close or sign out of the official Jackery app. Jackery appears to allow only one active account session at once, so another Jackery client can invalidate the diagnostics login while this tool is running.
 
 1. Open `Settings > Devices & Services > Integrations`.
 2. Add `Jackery Diagnostics`.
-3. Enter the same email address and password you use in the Jackery mobile app.
-4. Wait about 30 seconds for the probe to finish.
-5. Open Home Assistant notifications to review the results.
+3. Enter the same email address and password you use in the Jackery app.
+4. Wait about 60 seconds for the probe and passive MQTT capture to finish.
+5. Open the Home Assistant notification named `Jackery Diagnostics Results` for a quick summary.
+6. On the Jackery Diagnostics integration page, click the three-dot menu and choose `Download diagnostics`.
+7. Attach the downloaded diagnostics file to the GitHub issue after checking that account details, tokens, and serial numbers are redacted.
 
 The credentials are used only to authenticate with the Jackery cloud and run the diagnostic probe.
 
@@ -40,6 +44,7 @@ The credentials are used only to authenticate with the Jackery cloud and run the
 
 - Persistent notification in Home Assistant with readable per-endpoint results
 - Full untruncated JSON output at `/config/jackery_diagnostics_results.json`
+- Home Assistant `Download diagnostics` support from the integration's three-dot menu
 - `property_snapshots` per device for before/after comparisons
 - `previous_result_diff` after the second and later runs
 - `socketry_protocol_catalog` with known writable property IDs, action IDs, value labels, and MQTT command payload shape

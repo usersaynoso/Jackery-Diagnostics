@@ -49,7 +49,9 @@ class MetadataTests(unittest.TestCase):
     def test_readme_covers_hacs_install_and_notification_flow(self) -> None:
         self.assertIn("Custom repositories", self.readme)
         self.assertIn("Settings > Devices & Services > Integrations", self.readme)
-        self.assertIn("wait about 30 seconds", self.readme.lower())
+        self.assertIn("wait about 60 seconds", self.readme.lower())
+        self.assertIn("Download diagnostics", self.readme)
+        self.assertIn("disable the normal Jackery Home Assistant integration", self.readme)
         self.assertIn("/config/jackery_diagnostics_results.json", self.readme)
         self.assertIn("previous_result_diff", self.readme)
         self.assertIn("charging_plan_analysis", self.readme)

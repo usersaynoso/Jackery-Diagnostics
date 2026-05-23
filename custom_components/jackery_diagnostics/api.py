@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -28,24 +29,32 @@ from .const import (
     FIXED_MAC_ID_SEED,
     HEADER_PROFILES,
     LOGIN_ENDPOINT,
+    METHOD_DISCOVERY_ENDPOINTS,
+    METHOD_DISCOVERY_METHODS,
     MQTT_CAPTURE_SECONDS,
     PROPERTY_SNAPSHOT_PROFILES,
     PROBE_ENDPOINTS,
     READ_ONLY_POST_BODY_FORMATS,
+    READ_ONLY_POST_HEADER_PROFILES,
     READ_ONLY_POST_IDENTIFIER_NAMES,
     READ_ONLY_POST_PROBE_ENDPOINTS,
     REQUEST_TIMEOUT,
     RSA_PUBLIC_KEY,
+    SOURCE_SCAN_TERMS,
     TUYA_CHARGING_PLAN_TERMS,
     TUYA_FINGERPRINT_FIELDS,
     TUYA_PATH_PROBE_ENDPOINTS,
 )
 
 try:
+    import socketry as SocketryModule
+    import socketry.properties as SocketryPropertiesModule
     from socketry import Client as SocketryClient
     from socketry.properties import MODEL_NAMES, PROPERTIES
 except ModuleNotFoundError as err:  # pragma: no cover - optional runtime dependency
     if err.name in {"socketry", "aiohttp", "aiomqtt", "Crypto"}:
+        SocketryModule = None
+        SocketryPropertiesModule = None
         SocketryClient = None
         MODEL_NAMES = {}
         PROPERTIES = ()
@@ -236,6 +245,45 @@ def _hash_jsonable(value: Any) -> str:
     return _response_hash(body)
 
 
+def _response_json_shape(body: str) -> dict[str, Any]:
+    """Return a compact schema-like summary of a probe response body."""
+    payload = _parse_json(body)
+    if payload is None:
+        return {
+            "json": False,
+            "body_length": len(body),
+            "body_hash": _response_hash(body),
+        }
+
+    data_field = "data" if "data" in payload else "result"
+    data = payload.get(data_field)
+    shape: dict[str, Any] = {
+        "json": True,
+        "top_level_keys": sorted(str(key) for key in payload),
+        "payload_field": data_field if data is not None else None,
+        "code": payload.get("code"),
+        "msg": payload.get("msg"),
+        "success": payload.get("success"),
+        "encryption": payload.get("encryption"),
+        "body_hash": _response_hash(body),
+    }
+    if isinstance(data, dict):
+        shape["data_type"] = "dict"
+        shape["data_keys"] = sorted(str(key) for key in data)[:80]
+        properties = data.get("properties")
+        if isinstance(properties, dict):
+            shape["property_key_count"] = len(properties)
+            shape["property_keys"] = sorted(str(key) for key in properties)[:80]
+    elif isinstance(data, list):
+        shape["data_type"] = "list"
+        shape["data_length"] = len(data)
+        if data and isinstance(data[0], dict):
+            shape["first_item_keys"] = sorted(str(key) for key in data[0])[:80]
+    else:
+        shape["data_type"] = type(data).__name__ if data is not None else "none"
+    return shape
+
+
 def _setting_to_dict(setting: Any) -> dict[str, Any]:
     """Serialize a Socketry Setting object without importing its type in tests."""
     return {
@@ -264,6 +312,55 @@ def _is_charging_plan_setting(setting: dict[str, Any]) -> bool:
     return "charg" in text and "plan" in text
 
 
+def _source_scan(module: Any, label: str) -> dict[str, Any]:
+    """Scan a local installed module for charging-plan related literals."""
+    if module is None:
+        return {"available": False, "label": label, "reason": "module unavailable"}
+
+    try:
+        source = inspect.getsource(module)
+    except (OSError, TypeError) as err:
+        return {
+            "available": False,
+            "label": label,
+            "module_file": getattr(module, "__file__", None),
+            "reason": str(err),
+        }
+
+    hits: list[dict[str, Any]] = []
+    lower_source = source.lower()
+    for term in SOURCE_SCAN_TERMS:
+        term_text = term.lower()
+        start = 0
+        while True:
+            index = lower_source.find(term_text, start)
+            if index < 0:
+                break
+            snippet_start = max(0, index - 80)
+            snippet_end = min(len(source), index + len(term_text) + 80)
+            hits.append(
+                {
+                    "term": term,
+                    "offset": index,
+                    "snippet": " ".join(source[snippet_start:snippet_end].split()),
+                }
+            )
+            start = index + len(term_text)
+            if len(hits) >= 100:
+                break
+        if len(hits) >= 100:
+            break
+
+    return {
+        "available": True,
+        "label": label,
+        "module_file": getattr(module, "__file__", None),
+        "source_hash": _response_hash(source),
+        "terms_found": sorted({hit["term"] for hit in hits}),
+        "hits": hits[:50],
+    }
+
+
 def build_socketry_protocol_catalog() -> dict[str, Any]:
     """Return Socketry's reverse-engineered setting and model catalog."""
     if not PROPERTIES:
@@ -274,6 +371,10 @@ def build_socketry_protocol_catalog() -> dict[str, Any]:
             "writable_settings": [],
             "model_names": {},
             "charging_plan_entries": [],
+            "source_scans": [
+                _source_scan(SocketryModule, "socketry"),
+                _source_scan(SocketryPropertiesModule, "socketry.properties"),
+            ],
         }
 
     settings = [_setting_to_dict(setting) for setting in PROPERTIES]
@@ -287,6 +388,10 @@ def build_socketry_protocol_catalog() -> dict[str, Any]:
         "writable_settings": writable_settings,
         "model_names": dict(MODEL_NAMES),
         "charging_plan_entries": charging_plan_entries,
+        "source_scans": [
+            _source_scan(SocketryModule, "socketry"),
+            _source_scan(SocketryPropertiesModule, "socketry.properties"),
+        ],
         "mqtt_command_payload_shape": {
             "deviceSn": "<device serial>",
             "id": "<milliseconds timestamp>",
@@ -320,8 +425,9 @@ def build_capture_guidance() -> dict[str, Any]:
             ],
         },
         "safe_probe_policy": (
-            "This diagnostic integration performs read-only HTTP GET probes and "
-            "does not publish MQTT commands or send setting writes."
+            "This diagnostic integration performs read-only HTTP GET, HEAD, "
+            "OPTIONS, and identifier-only POST probes. It does not publish MQTT "
+            "commands or send setting writes."
         ),
     }
 
@@ -356,6 +462,140 @@ def _candidate_payload_preview(body: str, limit: int = 800) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[: limit - 3]}..."
+
+
+def build_response_catalog(probes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a compact catalogue of response shapes across all probe families."""
+    endpoint_statuses: dict[str, set[str]] = {}
+    interesting_shapes: list[dict[str, Any]] = []
+    non_empty_data: list[dict[str, Any]] = []
+    body_hashes: dict[str, int] = {}
+
+    for probe in probes:
+        endpoint = str(probe.get("endpoint"))
+        method = str(probe.get("method", "GET"))
+        status = str(probe.get("http_status"))
+        key = f"{method} {endpoint}"
+        endpoint_statuses.setdefault(key, set()).add(status)
+        body = str(probe.get("body", ""))
+        body_hash = str(probe.get("body_hash") or _response_hash(body))
+        body_hashes[body_hash] = body_hashes.get(body_hash, 0) + 1
+        shape = _response_json_shape(body)
+
+        data_type = shape.get("data_type")
+        has_data = (
+            data_type == "dict"
+            or (data_type == "list" and shape.get("data_length", 0) > 0)
+        )
+        if has_data:
+            non_empty_data.append(
+                {
+                    "method": method,
+                    "endpoint": endpoint,
+                    "header_profile": probe.get("header_profile"),
+                    "parameter_name": probe.get("parameter_name"),
+                    "body_format": probe.get("body_format"),
+                    "http_status": probe.get("http_status"),
+                    "shape": shape,
+                }
+            )
+        if probe.get("interesting") or _find_charging_plan_terms(body):
+            interesting_shapes.append(
+                {
+                    "method": method,
+                    "endpoint": endpoint,
+                    "header_profile": probe.get("header_profile"),
+                    "parameter_name": probe.get("parameter_name"),
+                    "body_format": probe.get("body_format"),
+                    "http_status": probe.get("http_status"),
+                    "shape": shape,
+                    "charging_plan_terms": _find_charging_plan_terms(body),
+                }
+            )
+
+    return {
+        "endpoint_statuses": [
+            {"endpoint": endpoint, "statuses": sorted(statuses)}
+            for endpoint, statuses in sorted(endpoint_statuses.items())
+        ],
+        "unique_body_hash_count": len(body_hashes),
+        "repeated_body_hashes": [
+            {"body_hash": body_hash, "count": count}
+            for body_hash, count in sorted(
+                body_hashes.items(), key=lambda item: (-item[1], item[0])
+            )
+            if count > 1
+        ][:25],
+        "non_empty_data": non_empty_data[:50],
+        "interesting_shapes": interesting_shapes[:50],
+    }
+
+
+def build_implementation_readiness(
+    analysis: dict[str, Any],
+    tuya_fingerprint: dict[str, Any],
+    response_catalog: dict[str, Any],
+    socketry_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Explain whether diagnostics found enough evidence to implement entities."""
+    expected = analysis.get("main_integration_expected_entities", {})
+    switch = expected.get("charging_plan_switch", {})
+    time_entity = expected.get("charging_plan_time", {})
+    repeat_entity = expected.get("charging_plan_repeat", {})
+    candidate_probes = analysis.get("candidate_probes", [])
+    successful_candidate_reads = [
+        probe
+        for probe in candidate_probes
+        if probe.get("http_status") == 200
+        and '"code":0' in str(probe.get("body_preview", "")).replace(" ", "")
+        and '"data":null' not in str(probe.get("body_preview", "")).replace(" ", "")
+    ]
+    socketry_has_charging_write = bool(
+        socketry_metadata.get("charging_plan_entries")
+    )
+    tuya_has_schema = bool(tuya_fingerprint.get("has_charging_plan_schema_evidence"))
+    non_empty_shapes = response_catalog.get("non_empty_data", [])
+
+    requirements = {
+        "switch_state_key": bool(
+            switch.get("reported_in_property_snapshots")
+            or switch.get("reported_by_socketry")
+        ),
+        "time_repeat_state_key": bool(
+            time_entity.get("reported_in_property_snapshots")
+            or time_entity.get("reported_by_socketry")
+            or repeat_entity.get("reported_in_property_snapshots")
+            or repeat_entity.get("reported_by_socketry")
+        ),
+        "read_endpoint": bool(successful_candidate_reads or tuya_has_schema),
+        "write_path": bool(
+            socketry_has_charging_write
+            or tuya_fingerprint.get("has_charging_plan_schema_evidence")
+        ),
+        "payload_shape": bool(
+            socketry_has_charging_write
+            or tuya_fingerprint.get("charging_plan_hits")
+            or successful_candidate_reads
+        ),
+    }
+    missing = [
+        name
+        for name, found in requirements.items()
+        if not found
+    ]
+    return {
+        "ready_to_add_entities": not missing,
+        "requirements": requirements,
+        "missing": missing,
+        "successful_candidate_reads": successful_candidate_reads[:10],
+        "non_empty_response_shapes": non_empty_shapes[:10],
+        "next_step_if_not_ready": (
+            "If any requirement is missing after this release, Home Assistant "
+            "diagnostics alone did not expose the charging-plan contract. The "
+            "remaining source of truth is an official app HTTPS capture, "
+            "APK-derived endpoint/payload, or vendor/Tuya schema access."
+        ),
+    }
 
 
 _TUYA_FIELD_LOOKUP = {field.lower(): field for field in TUYA_FINGERPRINT_FIELDS}
@@ -699,6 +939,13 @@ def format_probe_notification(results: dict[str, Any]) -> str:
             lines.append(
                 f"- Read-only POST probes: {post_interesting} interesting response(s)"
             )
+        method_interesting = _interesting_probe_count(
+            device, "method_discovery_probes"
+        )
+        if method_interesting:
+            lines.append(
+                f"- Method discovery: {method_interesting} interesting response(s)"
+            )
         analysis = device.get("charging_plan_analysis")
         if analysis:
             expected = analysis.get("main_integration_expected_entities", {})
@@ -722,6 +969,15 @@ def format_probe_notification(results: dict[str, Any]) -> str:
                     "charging-plan schema="
                     f"{tuya_fingerprint.get('has_charging_plan_schema_evidence')}, "
                     f"probe results={tuya_fingerprint.get('tuya_probe_count', 0)}"
+                )
+            )
+        readiness = device.get("implementation_readiness")
+        if readiness:
+            lines.append(
+                (
+                    "- Implementation readiness: "
+                    f"ready={readiness.get('ready_to_add_entities')}, "
+                    f"missing={', '.join(readiness.get('missing', [])) or 'none'}"
                 )
             )
 
@@ -856,6 +1112,40 @@ class JackeryDiagnosticsClient:
                 payload,
                 header_profile,
                 body_format,
+                retry=False,
+            )
+
+        return response
+
+    def _request_with_header_profile(
+        self,
+        method: str,
+        endpoint: str,
+        header_profile: str,
+        *,
+        retry: bool = True,
+    ):
+        if not self._token:
+            self.login()
+
+        assert self._token is not None
+        try:
+            response = requests.request(
+                method,
+                f"{BASE_URL}{endpoint}",
+                headers=_build_token_headers(self._token, header_profile),
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise JackeryConnectionError(str(err)) from err
+
+        payload = _parse_json(response.text)
+        if retry and payload is not None and payload.get("code") == 10402:
+            self.login()
+            return self._request_with_header_profile(
+                method,
+                endpoint,
+                header_profile,
                 retry=False,
             )
 
@@ -1071,8 +1361,10 @@ class JackeryDiagnosticsClient:
         values: dict[str, Any] = {
             "deviceId": device.get("id"),
             "devId": device.get("id"),
+            "id": device.get("id"),
             "deviceSn": device.get("device_sn"),
             "devSn": device.get("device_sn"),
+            "sn": device.get("device_sn"),
             "deviceCode": _device_value(raw, "deviceCode", "device_code"),
         }
         identifiers: list[tuple[str, str | int]] = []
@@ -1081,6 +1373,73 @@ class JackeryDiagnosticsClient:
             if value not in (None, ""):
                 identifiers.append((name, value))
         return identifiers
+
+    def _post_payload_variants(
+        self, device: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any], str, str | int]]:
+        """Return identifier-only POST bodies for likely mobile screen reads."""
+        variants: list[tuple[str, dict[str, Any], str, str | int]] = [
+            (name, {name: value}, name, value)
+            for name, value in self._post_identifier_values(device)
+        ]
+
+        raw = device.get("raw", {})
+        device_id = device.get("id")
+        device_sn = device.get("device_sn")
+        device_code = _device_value(raw, "deviceCode", "device_code")
+        if device_id not in (None, "") and device_sn not in (None, ""):
+            variants.extend(
+                (
+                    (
+                        "deviceId_deviceSn",
+                        {"deviceId": device_id, "deviceSn": device_sn},
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                    (
+                        "devId_devSn",
+                        {"devId": device_id, "devSn": device_sn},
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                    (
+                        "id_sn",
+                        {"id": device_id, "sn": device_sn},
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                    (
+                        "deviceId_deviceSn_page",
+                        {
+                            "deviceId": device_id,
+                            "deviceSn": device_sn,
+                            "pageNo": 1,
+                            "pageSize": 20,
+                        },
+                        "combined",
+                        "<multiple identifiers>",
+                    ),
+                )
+            )
+        if device_id not in (None, ""):
+            variants.append(
+                (
+                    "deviceId_page",
+                    {"deviceId": device_id, "pageNo": 1, "pageSize": 20},
+                    "deviceId",
+                    device_id,
+                )
+            )
+        if device_code not in (None, "") and device_sn not in (None, ""):
+            variants.append(
+                (
+                    "deviceCode_deviceSn",
+                    {"deviceCode": device_code, "deviceSn": device_sn},
+                    "combined",
+                    "<multiple identifiers>",
+                )
+            )
+        return variants
 
     def _collect_property_snapshots(
         self, device: dict[str, Any]
@@ -1150,6 +1509,7 @@ class JackeryDiagnosticsClient:
         parameter_value: str | int,
         header_profile: str,
         body_format: str,
+        payload_variant: str,
     ) -> dict[str, Any]:
         """Run one safe read-only POST probe with a device identifier body."""
         try:
@@ -1167,6 +1527,7 @@ class JackeryDiagnosticsClient:
                 "probe_family": "post_read",
                 "header_profile": header_profile,
                 "body_format": body_format,
+                "payload_variant": payload_variant,
                 "parameter_name": parameter_name,
                 "parameter_value": str(parameter_value),
                 "request_body": dict(payload),
@@ -1184,6 +1545,7 @@ class JackeryDiagnosticsClient:
                 "probe_family": "post_read",
                 "header_profile": header_profile,
                 "body_format": body_format,
+                "payload_variant": payload_variant,
                 "parameter_name": parameter_name,
                 "parameter_value": str(parameter_value),
                 "request_body": dict(payload),
@@ -1208,6 +1570,7 @@ class JackeryDiagnosticsClient:
                 "probe_family": "post_read",
                 "header_profile": header_profile,
                 "body_format": body_format,
+                "payload_variant": payload_variant,
                 "parameter_name": parameter_name,
                 "parameter_value": str(parameter_value),
                 "request_body": dict(payload),
@@ -1224,20 +1587,101 @@ class JackeryDiagnosticsClient:
     ) -> list[dict[str, Any]]:
         """Probe read-like mobile endpoints that may require POST bodies."""
         probes: list[dict[str, Any]] = []
-        identifiers = self._post_identifier_values(device)
+        payload_variants = self._post_payload_variants(device)
         for endpoint in READ_ONLY_POST_PROBE_ENDPOINTS:
-            for parameter_name, parameter_value in identifiers:
-                payload = {parameter_name: parameter_value}
+            for payload_variant, payload, parameter_name, parameter_value in payload_variants:
                 for body_format in READ_ONLY_POST_BODY_FORMATS:
+                    for header_profile in READ_ONLY_POST_HEADER_PROFILES:
+                        probes.append(
+                            self._probe_single_post_read(
+                                device,
+                                endpoint,
+                                payload,
+                                parameter_name,
+                                parameter_value,
+                                header_profile,
+                                body_format,
+                                payload_variant,
+                            )
+                        )
+        return probes
+
+    def _probe_method_discovery(
+        self,
+        device: dict[str, Any],
+        endpoint: str,
+        method: str,
+        header_profile: str,
+    ) -> dict[str, Any]:
+        """Probe endpoint method availability without a request body."""
+        try:
+            response = self._request_with_header_profile(
+                method,
+                endpoint,
+                header_profile,
+            )
+            allow_header = response.headers.get("allow") if response.headers else None
+            body = response.text
+            interesting = response.status_code not in {404, 405}
+            return {
+                "method": method,
+                "endpoint": endpoint,
+                "probe_family": "method_discovery",
+                "header_profile": header_profile,
+                "http_status": response.status_code,
+                "allow": allow_header,
+                "body": body,
+                "body_hash": _response_hash(body),
+                "interesting": interesting,
+                "error": False,
+            }
+        except JackeryDiagnosticsError as err:
+            return {
+                "method": method,
+                "endpoint": endpoint,
+                "probe_family": "method_discovery",
+                "header_profile": header_profile,
+                "http_status": "ERROR",
+                "allow": None,
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unexpected method discovery probe error for %s on %s %s",
+                device["name"],
+                method,
+                endpoint,
+            )
+            return {
+                "method": method,
+                "endpoint": endpoint,
+                "probe_family": "method_discovery",
+                "header_profile": header_profile,
+                "http_status": "ERROR",
+                "allow": None,
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+
+    def _collect_method_discovery_probes(
+        self, device: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Probe HEAD/OPTIONS availability for likely read endpoints."""
+        probes: list[dict[str, Any]] = []
+        for endpoint in METHOD_DISCOVERY_ENDPOINTS:
+            for method in METHOD_DISCOVERY_METHODS:
+                for header_profile in READ_ONLY_POST_HEADER_PROFILES:
                     probes.append(
-                        self._probe_single_post_read(
+                        self._probe_method_discovery(
                             device,
                             endpoint,
-                            payload,
-                            parameter_name,
-                            parameter_value,
-                            "android_apk_1_0_7",
-                            body_format,
+                            method,
+                            header_profile,
                         )
                     )
         return probes
@@ -1445,6 +1889,7 @@ class JackeryDiagnosticsClient:
         property_snapshots: list[dict[str, Any]],
         extended_probes: list[dict[str, Any]],
         post_read_probes: list[dict[str, Any]],
+        method_discovery_probes: list[dict[str, Any]],
         tuya_probes: list[dict[str, Any]],
         socketry_metadata: dict[str, Any],
         mqtt_capture: dict[str, Any],
@@ -1461,7 +1906,13 @@ class JackeryDiagnosticsClient:
         for keys in property_keys_by_profile.values():
             all_property_keys.update(keys)
 
-        all_probes = [*probes, *extended_probes, *post_read_probes, *tuya_probes]
+        all_probes = [
+            *probes,
+            *extended_probes,
+            *post_read_probes,
+            *method_discovery_probes,
+            *tuya_probes,
+        ]
         candidate_probes = [
             {
                 "method": probe.get("method", "GET"),
@@ -1542,6 +1993,11 @@ class JackeryDiagnosticsClient:
             "post_read_interesting_count": _interesting_probe_count(
                 {"post_read_probes": post_read_probes}, "post_read_probes"
             ),
+            "method_discovery_probe_count": len(method_discovery_probes),
+            "method_discovery_interesting_count": _interesting_probe_count(
+                {"method_discovery_probes": method_discovery_probes},
+                "method_discovery_probes",
+            ),
             "mqtt_message_count": len(mqtt_messages),
             "mqtt_candidate_messages": mqtt_candidate_messages[:25],
             "tuya_fingerprint_summary": {
@@ -1602,14 +2058,41 @@ class JackeryDiagnosticsClient:
                     break
             extended_probes = self._collect_extended_probes(device)
             post_read_probes = self._collect_post_read_probes(device)
+            method_discovery_probes = self._collect_method_discovery_probes(device)
             tuya_probes = self._collect_tuya_path_probes(device)
             socketry_metadata = self._supported_socketry_settings(
                 snapshot_properties
             )
+            all_device_probes = [
+                *probes,
+                *extended_probes,
+                *post_read_probes,
+                *method_discovery_probes,
+                *tuya_probes,
+            ]
             tuya_fingerprint = build_tuya_fingerprint(
                 device,
-                [*probes, *extended_probes, *post_read_probes, *tuya_probes],
+                all_device_probes,
                 property_snapshots,
+            )
+            response_catalog = build_response_catalog(all_device_probes)
+            charging_plan_analysis = self._build_charging_plan_analysis(
+                device,
+                probes,
+                property_snapshots,
+                extended_probes,
+                post_read_probes,
+                method_discovery_probes,
+                tuya_probes,
+                socketry_metadata,
+                mqtt_capture,
+                tuya_fingerprint,
+            )
+            implementation_readiness = build_implementation_readiness(
+                charging_plan_analysis,
+                tuya_fingerprint,
+                response_catalog,
+                socketry_metadata,
             )
 
             device_results.append(
@@ -1622,20 +2105,13 @@ class JackeryDiagnosticsClient:
                     "property_snapshots": property_snapshots,
                     "extended_probes": extended_probes,
                     "post_read_probes": post_read_probes,
+                    "method_discovery_probes": method_discovery_probes,
                     "tuya_probes": tuya_probes,
                     "tuya_fingerprint": tuya_fingerprint,
+                    "response_catalog": response_catalog,
                     "socketry_device_metadata": socketry_metadata,
-                    "charging_plan_analysis": self._build_charging_plan_analysis(
-                        device,
-                        probes,
-                        property_snapshots,
-                        extended_probes,
-                        post_read_probes,
-                        tuya_probes,
-                        socketry_metadata,
-                        mqtt_capture,
-                        tuya_fingerprint,
-                    ),
+                    "charging_plan_analysis": charging_plan_analysis,
+                    "implementation_readiness": implementation_readiness,
                 }
             )
 

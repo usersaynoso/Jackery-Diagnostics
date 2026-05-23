@@ -156,6 +156,13 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                         "generated_at": "2026-05-23T12:00:00+00:00",
                         "socketry_protocol_catalog": {
                             "available": True,
+                            "source_scans": [
+                                {
+                                    "available": True,
+                                    "terms_found": ["charge"],
+                                    "hits": [{"term": "charge"}],
+                                }
+                            ],
                             "writable_settings": [
                                 {"id": "oac", "slug": "ac", "action_id": 4}
                             ],
@@ -172,6 +179,10 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                 "name": "Explorer",
                                 "charging_plan_analysis": {
                                     "charging_plan_keys_reported": [],
+                                },
+                                "implementation_readiness": {
+                                    "ready_to_add_entities": False,
+                                    "missing": ["write_path"],
                                 },
                                 "tuya_fingerprint": {
                                     "has_tuya_schema_evidence": True,
@@ -215,6 +226,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         "endpoint": "/v1/device/chargePlan/list",
                                         "probe_family": "post_read",
                                         "body_format": "json",
+                                        "payload_variant": "deviceId",
                                         "parameter_name": "deviceId",
                                         "parameter_value": 123,
                                         "request_body": {"deviceId": 123},
@@ -223,6 +235,22 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         ),
                                     }
                                 ],
+                                "method_discovery_probes": [
+                                    {
+                                        "method": "OPTIONS",
+                                        "endpoint": "/v1/device/chargePlan/list",
+                                        "probe_family": "method_discovery",
+                                        "header_profile": "android_apk_1_0_7",
+                                        "http_status": 204,
+                                        "allow": "GET, POST, OPTIONS",
+                                        "body": "",
+                                        "interesting": True,
+                                    }
+                                ],
+                                "response_catalog": {
+                                    "unique_body_hash_count": 1,
+                                    "interesting_shapes": [],
+                                },
                                 "tuya_probes": [
                                     {
                                         "endpoint": "/v1.0/devices/{device_id}/status",
@@ -251,6 +279,14 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(device["model"]["modelCode"], 13)
         self.assertEqual(device["model"]["modelName"], "HTE1195000A")
         self.assertEqual(device["property_snapshots"][0]["properties"], {"rb": 97})
+        self.assertEqual(
+            result["probe"]["socketry_protocol_catalog"]["source_scans"][0][
+                "terms_found"
+            ],
+            ["charge"],
+        )
+        self.assertFalse(device["implementation_readiness"]["ready_to_add_entities"])
+        self.assertEqual(device["response_catalog"]["unique_body_hash_count"], 1)
         self.assertTrue(device["tuya_fingerprint"]["has_tuya_schema_evidence"])
         self.assertEqual(
             device["tuya_fingerprint"]["field_hits"][0]["value_preview"],
@@ -267,6 +303,10 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             device["post_read_probes"][0]["request_body"]["deviceId"],
             "**REDACTED**",
+        )
+        self.assertEqual(
+            device["method_discovery_probes"][0]["allow"],
+            "GET, POST, OPTIONS",
         )
         probe = device["interesting_probes"][0]
         self.assertEqual(probe["parameter_value"], "**REDACTED**")

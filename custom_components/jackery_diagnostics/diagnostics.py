@@ -158,6 +158,7 @@ def _scope_socketry_protocol_catalog(catalog: Any) -> dict[str, Any]:
         "reason": catalog.get("reason"),
         "charging_plan_entries": catalog.get("charging_plan_entries", []),
         "writable_settings": catalog.get("writable_settings", []),
+        "source_scans": catalog.get("source_scans", []),
         "mqtt_command_payload_shape": catalog.get("mqtt_command_payload_shape"),
     }
 
@@ -215,7 +216,9 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
             "devName": raw.get("devName"),
         },
         "charging_plan_analysis": device.get("charging_plan_analysis"),
+        "implementation_readiness": device.get("implementation_readiness"),
         "tuya_fingerprint": device.get("tuya_fingerprint"),
+        "response_catalog": device.get("response_catalog"),
         "property_snapshots": [
             _scope_property_snapshot(snapshot)
             for snapshot in device.get("property_snapshots", [])
@@ -230,12 +233,18 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
                 *device.get("probes", []),
                 *device.get("extended_probes", []),
                 *device.get("post_read_probes", []),
+                *device.get("method_discovery_probes", []),
             ]
             if isinstance(probe, dict) and probe.get("interesting")
         ],
         "post_read_probes": [
             _scope_probe(probe)
             for probe in device.get("post_read_probes", [])
+            if isinstance(probe, dict)
+        ],
+        "method_discovery_probes": [
+            _scope_probe(probe)
+            for probe in device.get("method_discovery_probes", [])
             if isinstance(probe, dict)
         ],
         "tuya_probes": [
@@ -282,11 +291,13 @@ def _scope_probe(probe: dict[str, Any]) -> dict[str, Any]:
         "probe_family": probe.get("probe_family"),
         "header_profile": probe.get("header_profile"),
         "body_format": probe.get("body_format"),
+        "payload_variant": probe.get("payload_variant"),
         "parameter_name": probe.get("parameter_name"),
         "parameter_value": probe.get("parameter_value"),
         "request_body": probe.get("request_body"),
         "request_body_hash": probe.get("request_body_hash"),
         "http_status": probe.get("http_status"),
+        "allow": probe.get("allow"),
         "body_hash": probe.get("body_hash"),
         "body": probe.get("body"),
         "error": probe.get("error"),

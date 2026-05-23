@@ -26,6 +26,8 @@ from custom_components.jackery_diagnostics.api import (
     JackeryAuthenticationError,
     JackeryConnectionError,
     JackeryDiagnosticsClient,
+    build_implementation_readiness,
+    build_response_catalog,
     build_tuya_fingerprint,
     build_login_payload,
     compare_probe_results,
@@ -38,9 +40,12 @@ from custom_components.jackery_diagnostics.const import (
     AES_KEY,
     EXTENDED_IDENTIFIER_NAMES,
     EXTENDED_PROBE_ENDPOINTS,
+    METHOD_DISCOVERY_ENDPOINTS,
+    METHOD_DISCOVERY_METHODS,
     PROPERTY_SNAPSHOT_PROFILES,
     PROBE_ENDPOINTS,
     READ_ONLY_POST_BODY_FORMATS,
+    READ_ONLY_POST_HEADER_PROFILES,
     READ_ONLY_POST_IDENTIFIER_NAMES,
     READ_ONLY_POST_PROBE_ENDPOINTS,
     TUYA_PATH_PROBE_ENDPOINTS,
@@ -70,10 +75,23 @@ def _read_only_post_count(*, has_device_code: bool = False) -> int:
     identifier_count = len(READ_ONLY_POST_IDENTIFIER_NAMES)
     if not has_device_code:
         identifier_count -= 1
+    payload_variant_count = identifier_count + 5
+    if has_device_code:
+        payload_variant_count += 1
     return (
         len(READ_ONLY_POST_PROBE_ENDPOINTS)
-        * identifier_count
+        * payload_variant_count
         * len(READ_ONLY_POST_BODY_FORMATS)
+        * len(READ_ONLY_POST_HEADER_PROFILES)
+    )
+
+
+def _method_discovery_count() -> int:
+    """Return the number of method-discovery responses needed after login."""
+    return (
+        len(METHOD_DISCOVERY_ENDPOINTS)
+        * len(METHOD_DISCOVERY_METHODS)
+        * len(READ_ONLY_POST_HEADER_PROFILES)
     )
 
 
@@ -133,10 +151,11 @@ class LoginAndProbeTests(unittest.TestCase):
         with self.assertRaises(JackeryAuthenticationError):
             JackeryDiagnosticsClient("dev@example.com", "secret").login()
 
+    @patch("custom_components.jackery_diagnostics.api.requests.request")
     @patch("custom_components.jackery_diagnostics.api.requests.get")
     @patch("custom_components.jackery_diagnostics.api.requests.post")
     def test_run_probe_scans_every_endpoint_for_both_identifiers(
-        self, mock_post: Mock, mock_get: Mock
+        self, mock_post: Mock, mock_get: Mock, mock_request: Mock
     ) -> None:
         mock_post.side_effect = [
             Mock(status_code=200, text='{"code":0,"token":"abc"}'),
@@ -158,6 +177,10 @@ class LoginAndProbeTests(unittest.TestCase):
                 for _ in range(_read_only_probe_count())
             ],
         ]
+        mock_request.side_effect = [
+            Mock(status_code=405, text="", headers={"allow": "GET, POST"})
+            for _ in range(_method_discovery_count())
+        ]
 
         with patch("custom_components.jackery_diagnostics.api.SocketryClient", None):
             result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
@@ -177,6 +200,10 @@ class LoginAndProbeTests(unittest.TestCase):
             len(result["devices"][0]["post_read_probes"]),
             _read_only_post_count(),
         )
+        self.assertEqual(
+            len(result["devices"][0]["method_discovery_probes"]),
+            _method_discovery_count(),
+        )
         post_probe = result["devices"][0]["post_read_probes"][0]
         self.assertEqual(post_probe["method"], "POST")
         self.assertEqual(post_probe["probe_family"], "post_read")
@@ -188,15 +215,18 @@ class LoginAndProbeTests(unittest.TestCase):
         )
         self.assertIn("tuya_fingerprint", result["devices"][0])
         self.assertIn("charging_plan_analysis", result["devices"][0])
+        self.assertIn("response_catalog", result["devices"][0])
+        self.assertIn("implementation_readiness", result["devices"][0])
         self.assertFalse(result["socketry_mqtt_capture"]["available"])
         probe_call_params = [call.kwargs["params"] for call in mock_get.call_args_list[1:]]
         self.assertIn({"deviceId": 123}, probe_call_params)
         self.assertIn({"deviceSn": "SN123"}, probe_call_params)
 
+    @patch("custom_components.jackery_diagnostics.api.requests.request")
     @patch("custom_components.jackery_diagnostics.api.requests.get")
     @patch("custom_components.jackery_diagnostics.api.requests.post")
     def test_run_probe_accepts_jackery_app_device_keys(
-        self, mock_post: Mock, mock_get: Mock
+        self, mock_post: Mock, mock_get: Mock, mock_request: Mock
     ) -> None:
         mock_post.side_effect = [
             Mock(status_code=200, text='{"code":0,"token":"abc"}'),
@@ -218,6 +248,10 @@ class LoginAndProbeTests(unittest.TestCase):
                 for _ in range(_read_only_probe_count())
             ],
         ]
+        mock_request.side_effect = [
+            Mock(status_code=405, text="", headers={"allow": "GET, POST"})
+            for _ in range(_method_discovery_count())
+        ]
 
         with patch("custom_components.jackery_diagnostics.api.SocketryClient", None):
             result = JackeryDiagnosticsClient("dev@example.com", "secret").run_probe()
@@ -226,10 +260,11 @@ class LoginAndProbeTests(unittest.TestCase):
         self.assertEqual(result["devices"][0]["device_sn"], "DEV456")
         self.assertEqual(result["devices"][0]["name"], "Explorer 2000 Plus")
 
+    @patch("custom_components.jackery_diagnostics.api.requests.request")
     @patch("custom_components.jackery_diagnostics.api.requests.get")
     @patch("custom_components.jackery_diagnostics.api.requests.post")
     def test_run_probe_records_request_errors_without_crashing(
-        self, mock_post: Mock, mock_get: Mock
+        self, mock_post: Mock, mock_get: Mock, mock_request: Mock
     ) -> None:
         mock_post.side_effect = [
             Mock(status_code=200, text='{"code":0,"token":"abc"}'),
@@ -248,6 +283,10 @@ class LoginAndProbeTests(unittest.TestCase):
                 Mock(status_code=404, text='{"code":404}')
                 for _ in range(_read_only_probe_count() - 1)
             ],
+        ]
+        mock_request.side_effect = [
+            Mock(status_code=405, text="", headers={"allow": "GET, POST"})
+            for _ in range(_method_discovery_count())
         ]
 
         with patch("custom_components.jackery_diagnostics.api.SocketryClient", None):
@@ -346,6 +385,71 @@ class LoginAndProbeTests(unittest.TestCase):
             hit for hit in fingerprint["field_hits"] if hit["field"] == "devId"
         )
         self.assertEqual(dev_id_hit["value_preview"], "<redacted>")
+
+    def test_response_catalog_and_readiness_summarize_evidence(self) -> None:
+        probes = [
+            {
+                "method": "POST",
+                "endpoint": "/v1/device/chargePlan/list",
+                "header_profile": "android_apk_1_0_7",
+                "parameter_name": "deviceId",
+                "body_format": "json",
+                "http_status": 200,
+                "body": json.dumps(
+                    {
+                        "code": 0,
+                        "data": {
+                            "charge_plan": {
+                                "enabled": True,
+                                "time": "22:00-06:00",
+                            }
+                        },
+                    }
+                ),
+                "body_hash": "abc",
+                "interesting": True,
+            }
+        ]
+        catalog = build_response_catalog(probes)
+        self.assertEqual(catalog["unique_body_hash_count"], 1)
+        self.assertEqual(
+            catalog["non_empty_data"][0]["shape"]["data_keys"],
+            ["charge_plan"],
+        )
+
+        readiness = build_implementation_readiness(
+            {
+                "main_integration_expected_entities": {
+                    "charging_plan_switch": {
+                        "reported_in_property_snapshots": True,
+                        "reported_by_socketry": False,
+                    },
+                    "charging_plan_time": {
+                        "reported_in_property_snapshots": True,
+                        "reported_by_socketry": False,
+                    },
+                    "charging_plan_repeat": {
+                        "reported_in_property_snapshots": True,
+                        "reported_by_socketry": False,
+                    },
+                },
+                "candidate_probes": [
+                    {
+                        "http_status": 200,
+                        "body_preview": '{"code":0,"data":{"charge_plan":{}}}',
+                    }
+                ],
+            },
+            {
+                "has_charging_plan_schema_evidence": True,
+                "charging_plan_hits": [{"path": "data.charge_plan"}],
+            },
+            catalog,
+            {"charging_plan_entries": [{"id": "charge_plan"}]},
+        )
+
+        self.assertTrue(readiness["ready_to_add_entities"])
+        self.assertEqual(readiness["missing"], [])
 
     def test_notification_includes_discovery_diagnostics_when_no_devices(self) -> None:
         notification = format_probe_notification(

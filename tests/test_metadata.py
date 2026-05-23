@@ -38,7 +38,7 @@ class MetadataTests(unittest.TestCase):
             self.manifest["requirements"],
             ["pycryptodomex>=3.9.0", "socketry>=0.2.4"],
         )
-        self.assertEqual(self.manifest["version"], "1.5")
+        self.assertEqual(self.manifest["version"], "1.6")
         self.assertEqual(self.manifest["iot_class"], "cloud_polling")
         self.assertTrue(self.manifest["config_flow"])
 
@@ -55,6 +55,9 @@ class MetadataTests(unittest.TestCase):
         self.assertIn("/config/jackery_diagnostics_results.json", self.readme)
         self.assertIn("previous_result_diff", self.readme)
         self.assertIn("charging_plan_analysis", self.readme)
+        self.assertIn("implementation_readiness", self.readme)
+        self.assertIn("response_catalog", self.readme)
+        self.assertIn("method_discovery_probes", self.readme)
         self.assertIn("tuya_fingerprint", self.readme)
         self.assertIn("read-only `POST`", self.readme)
         self.assertIn("Socketry", self.readme)

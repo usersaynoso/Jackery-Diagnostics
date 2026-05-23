@@ -9,12 +9,15 @@ The integration:
 - probes a fixed list of undocumented endpoints with both `deviceId` and `deviceSn`
 - probes an extended set of charging-plan candidates with Android APK-style headers
 - probes safe read-only `POST` list/detail/status/schema candidates because mobile apps often use `POST` for screen reads
+- probes `HEAD` and `OPTIONS` for likely screen-read endpoints to expose allowed methods without changing settings
 - probes Tuya-shaped read-only status, function, schema, and specification paths in case Jackery is fronting a Tuya/OEM backend
 - captures structured `/v1/device/property` snapshots
 - passively listens to Socketry MQTT property updates for 30 seconds without sending commands
 - compares the current snapshot with the previous saved run, so testers can run it before and after changing a charging plan in the official Jackery app
 - includes Socketry's reverse-engineered writable setting catalog and maps it to the properties reported by each device
+- scans the installed Socketry source/catalog for charging-plan related literals
 - writes a per-device `tuya_fingerprint` summary showing whether product keys, function schemas, status schemas, datapoints, or charging-plan terms appear in any read-only response
+- writes `response_catalog` and `implementation_readiness` summaries so developers can see whether the read key, write path, and payload shape are actually present
 - writes a per-device `charging_plan_analysis` summary for the missing `Charging Plan`, `Charging Plan Time`, and `Charging Plan Repeat` entities
 - flags non-404 responses as interesting
 - writes the full results to `/config/jackery_diagnostics_results.json`
@@ -53,14 +56,17 @@ The credentials are used only to authenticate with the Jackery cloud and run the
 - `socketry_protocol_catalog` with known writable property IDs, action IDs, value labels, and MQTT command payload shape
 - `socketry_mqtt_capture` with passive property messages observed during the diagnostic window
 - `post_read_probes` per device, covering safe read-only `POST` candidates with form and JSON request bodies
+- `method_discovery_probes` per device, covering `HEAD` and `OPTIONS` responses for likely charging-plan endpoints
 - `tuya_fingerprint` per device, including Tuya-like schema/status/function/datapoint field hits and any charging-plan terms found in read-only responses
 - `tuya_probes` per device, covering Jackery-hosted paths shaped like Tuya OpenAPI status/function/specification calls
+- `response_catalog` per device, summarizing response JSON shapes, non-empty data, status codes, and repeated body hashes
+- `implementation_readiness` per device, listing which evidence is still missing before the three charging-plan entities can be implemented reliably
 - `charging_plan_analysis` per device, including direct evidence for keys `107` and `108`
 - `capture_guidance` explaining what still requires a separate mobile-app HTTPS capture
 
 ## Tuya/OEM backend checks
 
-Some Jackery app behavior appears Tuya-like. The probe searches discovery data, property snapshots, extended endpoint responses, safe read-only `POST` responses, and Tuya-shaped path responses for fields such as `productKey`, `productId`, `category`, `functions`, `status`, `schema`, `dps`, `dpId`, `localKey`, and charging-plan terms such as `charge_plan`, `schedule`, `timer`, `107`, and `108`.
+Some Jackery app behavior appears Tuya-like. The probe searches discovery data, property snapshots, extended endpoint responses, safe read-only `POST` responses, method-discovery responses, Socketry source/catalog data, and Tuya-shaped path responses for fields such as `productKey`, `productId`, `category`, `functions`, `status`, `schema`, `dps`, `dpId`, `localKey`, and charging-plan terms such as `charge_plan`, `schedule`, `timer`, `107`, and `108`.
 
 Useful results will appear in each device's `tuya_fingerprint` section. If `has_tuya_schema_evidence` and `has_charging_plan_schema_evidence` are both false, the Jackery cloud path available to Home Assistant still has not exposed the read/write schema needed for the three charging-plan entities.
 

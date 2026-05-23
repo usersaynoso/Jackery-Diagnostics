@@ -173,6 +173,15 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                 "charging_plan_analysis": {
                                     "charging_plan_keys_reported": [],
                                 },
+                                "tuya_fingerprint": {
+                                    "has_tuya_schema_evidence": True,
+                                    "field_hits": [
+                                        {
+                                            "field": "devId",
+                                            "value_preview": "SN123",
+                                        }
+                                    ],
+                                },
                                 "property_snapshots": [
                                     {
                                         "endpoint": "/v1/device/property",
@@ -200,6 +209,16 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         ),
                                     }
                                 ],
+                                "tuya_probes": [
+                                    {
+                                        "endpoint": "/v1.0/devices/{device_id}/status",
+                                        "parameter_name": "device_id",
+                                        "parameter_value": 123,
+                                        "body": json.dumps(
+                                            {"data": {"devId": "SN123"}}
+                                        ),
+                                    }
+                                ],
                             }
                         ],
                     }
@@ -218,6 +237,15 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(device["model"]["modelCode"], 13)
         self.assertEqual(device["model"]["modelName"], "HTE1195000A")
         self.assertEqual(device["property_snapshots"][0]["properties"], {"rb": 97})
+        self.assertTrue(device["tuya_fingerprint"]["has_tuya_schema_evidence"])
+        self.assertEqual(
+            device["tuya_fingerprint"]["field_hits"][0]["value_preview"],
+            "**REDACTED**",
+        )
+        self.assertEqual(
+            device["tuya_probes"][0]["parameter_value"],
+            "**REDACTED**",
+        )
         probe = device["interesting_probes"][0]
         self.assertEqual(probe["parameter_value"], "**REDACTED**")
         self.assertNotIn("SN123", probe["body"])

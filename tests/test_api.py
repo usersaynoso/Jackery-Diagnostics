@@ -26,6 +26,7 @@ from custom_components.jackery_diagnostics.api import (
     JackeryAuthenticationError,
     JackeryConnectionError,
     JackeryDiagnosticsClient,
+    build_tuya_fingerprint,
     build_login_payload,
     compare_probe_results,
     encrypt_login_payload,
@@ -39,6 +40,7 @@ from custom_components.jackery_diagnostics.const import (
     EXTENDED_PROBE_ENDPOINTS,
     PROPERTY_SNAPSHOT_PROFILES,
     PROBE_ENDPOINTS,
+    TUYA_PATH_PROBE_ENDPOINTS,
 )
 
 
@@ -49,7 +51,15 @@ def _read_only_probe_count(*, has_device_code: bool = False) -> int:
     identifier_count = len(EXTENDED_IDENTIFIER_NAMES)
     if not has_device_code:
         identifier_count -= 1
-    return legacy_count + snapshot_count + (len(EXTENDED_PROBE_ENDPOINTS) * identifier_count)
+    tuya_path_count = len(TUYA_PATH_PROBE_ENDPOINTS) - 1
+    if has_device_code:
+        tuya_path_count += 1
+    return (
+        legacy_count
+        + snapshot_count
+        + (len(EXTENDED_PROBE_ENDPOINTS) * identifier_count)
+        + tuya_path_count
+    )
 
 
 class GenerateMacIdTests(unittest.TestCase):
@@ -142,6 +152,11 @@ class LoginAndProbeTests(unittest.TestCase):
             len(result["devices"][0]["extended_probes"]),
             len(EXTENDED_PROBE_ENDPOINTS) * (len(EXTENDED_IDENTIFIER_NAMES) - 1),
         )
+        self.assertEqual(
+            len(result["devices"][0]["tuya_probes"]),
+            len(TUYA_PATH_PROBE_ENDPOINTS) - 1,
+        )
+        self.assertIn("tuya_fingerprint", result["devices"][0])
         self.assertIn("charging_plan_analysis", result["devices"][0])
         self.assertFalse(result["socketry_mqtt_capture"]["available"])
         probe_call_params = [call.kwargs["params"] for call in mock_get.call_args_list[1:]]
@@ -233,6 +248,62 @@ class LoginAndProbeTests(unittest.TestCase):
 
         self.assertIn("INTERESTING /v1/device/workingMode", notification)
         self.assertIn("Explorer 1000", notification)
+
+    def test_tuya_fingerprint_detects_schema_and_charging_plan_terms(self) -> None:
+        fingerprint = build_tuya_fingerprint(
+            {
+                "raw": {
+                    "productKey": "pk123",
+                    "devId": "device-123",
+                }
+            },
+            [
+                {
+                    "method": "GET",
+                    "endpoint": "/v1.1/iot-03/devices/{device_id}/specification",
+                    "probe_family": "tuya_path",
+                    "header_profile": "android_apk_1_0_7",
+                    "parameter_name": "device_id",
+                    "parameter_value": "device-123",
+                    "http_status": 200,
+                    "body": json.dumps(
+                        {
+                            "success": True,
+                            "result": {
+                                "functions": [
+                                    {
+                                        "code": "charge_plan",
+                                        "type": "Raw",
+                                        "values": "{}",
+                                    }
+                                ],
+                                "status": [
+                                    {
+                                        "code": "dp107",
+                                        "type": "Boolean",
+                                        "values": "{}",
+                                    }
+                                ],
+                            },
+                        }
+                    ),
+                    "body_hash": "abc",
+                    "interesting": True,
+                }
+            ],
+            [],
+        )
+
+        self.assertTrue(fingerprint["has_tuya_schema_evidence"])
+        self.assertTrue(fingerprint["has_charging_plan_schema_evidence"])
+        self.assertIn("productKey", fingerprint["detected_fields"])
+        self.assertIn("functions", fingerprint["detected_fields"])
+        self.assertIn("charge_plan", fingerprint["detected_charging_plan_terms"])
+        self.assertIn("107", fingerprint["detected_charging_plan_terms"])
+        dev_id_hit = next(
+            hit for hit in fingerprint["field_hits"] if hit["field"] == "devId"
+        )
+        self.assertEqual(dev_id_hit["value_preview"], "<redacted>")
 
     def test_notification_includes_discovery_diagnostics_when_no_devices(self) -> None:
         notification = format_probe_notification(

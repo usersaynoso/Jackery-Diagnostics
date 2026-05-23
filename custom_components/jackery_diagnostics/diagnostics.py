@@ -33,9 +33,15 @@ TO_REDACT = {
 REDACTED = "**REDACTED**"
 SENSITIVE_PARAMETER_NAMES = {
     "devicecode",
+    "deviceid",
     "devicesn",
+    "devid",
     "devsn",
+    "id",
+    "localkey",
     "sn",
+    "uid",
+    "uuid",
 }
 
 
@@ -204,6 +210,7 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
             "devName": raw.get("devName"),
         },
         "charging_plan_analysis": device.get("charging_plan_analysis"),
+        "tuya_fingerprint": device.get("tuya_fingerprint"),
         "property_snapshots": [
             _scope_property_snapshot(snapshot)
             for snapshot in device.get("property_snapshots", [])
@@ -219,6 +226,11 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
                 *device.get("extended_probes", []),
             ]
             if isinstance(probe, dict) and probe.get("interesting")
+        ],
+        "tuya_probes": [
+            _scope_probe(probe)
+            for probe in device.get("tuya_probes", [])
+            if isinstance(probe, dict)
         ],
     }
 
@@ -276,6 +288,12 @@ def _redact_nested(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             if key == "parameter_value" and sensitive_parameter:
+                redacted[key] = REDACTED
+            elif (
+                key == "value_preview"
+                and str(value.get("field", "")).replace("_", "").lower()
+                in SENSITIVE_PARAMETER_NAMES
+            ):
                 redacted[key] = REDACTED
             elif key == "body" and isinstance(item, str):
                 redacted[key] = _redact_body_string(item)

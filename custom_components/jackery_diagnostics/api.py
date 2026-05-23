@@ -7,9 +7,11 @@ import hashlib
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from Cryptodome.Cipher import AES, PKCS1_v1_5
@@ -31,6 +33,9 @@ from .const import (
     PROBE_ENDPOINTS,
     REQUEST_TIMEOUT,
     RSA_PUBLIC_KEY,
+    TUYA_CHARGING_PLAN_TERMS,
+    TUYA_FINGERPRINT_FIELDS,
+    TUYA_PATH_PROBE_ENDPOINTS,
 )
 
 try:
@@ -331,6 +336,221 @@ def _candidate_payload_preview(body: str, limit: int = 800) -> str:
     return f"{compact[: limit - 3]}..."
 
 
+_TUYA_FIELD_LOOKUP = {field.lower(): field for field in TUYA_FINGERPRINT_FIELDS}
+_TUYA_SENSITIVE_FIELDS = {
+    "devid",
+    "devsn",
+    "devicecode",
+    "devicesn",
+    "localkey",
+    "sn",
+    "uid",
+    "uuid",
+}
+
+
+def _path_matches_tuya_endpoint(endpoint: object) -> bool:
+    text = str(endpoint).lower()
+    return (
+        "iot-03" in text
+        or "/v1.0/devices/" in text
+        or "/v1.1/iot-03/" in text
+        or "schema" in text
+        or "specification" in text
+        or "function" in text
+        or text.endswith("/status")
+        or "/status/" in text
+        or "/dp" in text
+        or "/dps" in text
+    )
+
+
+def _find_charging_plan_terms(value: object) -> list[str]:
+    text = str(value).lower()
+    terms: list[str] = []
+    for term in TUYA_CHARGING_PLAN_TERMS:
+        term_text = term.lower()
+        if term_text in {"107", "108"}:
+            if re.search(rf"(?<!\d){term_text}(?!\d)", text):
+                terms.append(term)
+        elif term_text in text:
+            terms.append(term)
+    return sorted(terms)
+
+
+def _preview_tuya_value(field: str, value: Any) -> str:
+    if field.replace("_", "").lower() in _TUYA_SENSITIVE_FIELDS:
+        return "<redacted>"
+    if isinstance(value, (dict, list)):
+        return f"<{type(value).__name__}>"
+    return _candidate_payload_preview(str(value), 120)
+
+
+def _tuya_field_hits_from_value(
+    value: Any,
+    *,
+    source: str,
+    path: str = "",
+) -> list[dict[str, Any]]:
+    hits: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            key_path = f"{path}.{key_text}" if path else key_text
+            canonical = _TUYA_FIELD_LOOKUP.get(key_text.lower())
+            if canonical is not None:
+                hits.append(
+                    {
+                        "source": source,
+                        "path": key_path,
+                        "field": canonical,
+                        "value_preview": _preview_tuya_value(canonical, item),
+                    }
+                )
+            hits.extend(
+                _tuya_field_hits_from_value(item, source=source, path=key_path)
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:100]):
+            item_path = f"{path}[{index}]" if path else f"[{index}]"
+            hits.extend(
+                _tuya_field_hits_from_value(item, source=source, path=item_path)
+            )
+    return hits
+
+
+def _charging_plan_hits_from_value(
+    value: Any,
+    *,
+    source: str,
+    path: str = "",
+) -> list[dict[str, Any]]:
+    hits: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            key_path = f"{path}.{key_text}" if path else key_text
+            terms = _find_charging_plan_terms(key_text)
+            if terms:
+                hits.append(
+                    {
+                        "source": source,
+                        "path": key_path,
+                        "terms": terms,
+                        "value_preview": _preview_tuya_value(key_text, item),
+                    }
+                )
+            hits.extend(
+                _charging_plan_hits_from_value(item, source=source, path=key_path)
+            )
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:100]):
+            item_path = f"{path}[{index}]" if path else f"[{index}]"
+            hits.extend(
+                _charging_plan_hits_from_value(item, source=source, path=item_path)
+            )
+    elif isinstance(value, str):
+        terms = _find_charging_plan_terms(value)
+        if terms:
+            hits.append(
+                {
+                    "source": source,
+                    "path": path or "<value>",
+                    "terms": terms,
+                    "value_preview": _candidate_payload_preview(value, 160),
+                }
+            )
+    return hits
+
+
+def build_tuya_fingerprint(
+    device: dict[str, Any],
+    probes: list[dict[str, Any]],
+    property_snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize Tuya-like schema and charging-plan evidence."""
+    field_hits: list[dict[str, Any]] = []
+    charging_hits: list[dict[str, Any]] = []
+
+    raw = device.get("raw")
+    if isinstance(raw, dict):
+        field_hits.extend(_tuya_field_hits_from_value(raw, source="device.raw"))
+        charging_hits.extend(_charging_plan_hits_from_value(raw, source="device.raw"))
+
+    for snapshot in property_snapshots:
+        properties = snapshot.get("properties")
+        if isinstance(properties, dict):
+            source = f"property_snapshot.{snapshot.get('header_profile')}"
+            field_hits.extend(_tuya_field_hits_from_value(properties, source=source))
+            charging_hits.extend(
+                _charging_plan_hits_from_value(properties, source=source)
+            )
+
+    tuya_probe_results: list[dict[str, Any]] = []
+    for probe in probes:
+        body = str(probe.get("body", ""))
+        endpoint = probe.get("endpoint", "")
+        parsed = _parse_json(body)
+        source = f"probe.{endpoint}"
+        if parsed is not None:
+            field_hits.extend(_tuya_field_hits_from_value(parsed, source=source))
+            charging_hits.extend(_charging_plan_hits_from_value(parsed, source=source))
+        else:
+            charging_hits.extend(_charging_plan_hits_from_value(body, source=source))
+
+        field_terms_present = any(
+            f'"{field}"' in body or field in body for field in TUYA_FINGERPRINT_FIELDS
+        )
+        charging_terms = _find_charging_plan_terms(body)
+        if (
+            probe.get("probe_family") == "tuya_path"
+            or _path_matches_tuya_endpoint(endpoint)
+            or field_terms_present
+            or charging_terms
+        ):
+            tuya_probe_results.append(
+                {
+                    "method": probe.get("method", "GET"),
+                    "endpoint": endpoint,
+                    "header_profile": probe.get("header_profile"),
+                    "parameter_name": probe.get("parameter_name"),
+                    "parameter_value": probe.get("parameter_value"),
+                    "http_status": probe.get("http_status"),
+                    "body_hash": probe.get("body_hash")
+                    or _response_hash(str(probe.get("body", ""))),
+                    "interesting": probe.get("interesting"),
+                    "field_terms_present": bool(field_terms_present),
+                    "charging_plan_terms_present": charging_terms,
+                    "body_preview": _candidate_payload_preview(body),
+                }
+            )
+
+    detected_fields = sorted({hit["field"] for hit in field_hits})
+    detected_terms = sorted(
+        {
+            term
+            for hit in charging_hits
+            for term in hit.get("terms", [])
+        }
+    )
+    return {
+        "has_tuya_schema_evidence": bool(field_hits),
+        "has_charging_plan_schema_evidence": bool(charging_hits),
+        "detected_fields": detected_fields,
+        "detected_charging_plan_terms": detected_terms,
+        "field_hits": field_hits[:50],
+        "charging_plan_hits": charging_hits[:50],
+        "tuya_probe_count": len(tuya_probe_results),
+        "tuya_probe_results": tuya_probe_results[:50],
+        "diagnosis_hint": (
+            "If Tuya fields or charging-plan terms appear here, use the returned "
+            "function/status schema to map read keys and command payloads. If this "
+            "section is empty, Jackery is not exposing Tuya schema through the "
+            "read-only Home Assistant probe path."
+        ),
+    }
+
+
 def format_probe_notification(results: dict[str, Any]) -> str:
     """Format probe results for a Home Assistant persistent notification."""
     lines = [
@@ -464,6 +684,17 @@ def format_probe_notification(results: dict[str, Any]) -> str:
                     f"108 property={data.get('reported_in_property_snapshots')}, "
                     f"candidate probes={analysis.get('candidate_probe_count', 0)}, "
                     f"MQTT candidates={len(analysis.get('mqtt_candidate_messages', []))}"
+                )
+            )
+        tuya_fingerprint = device.get("tuya_fingerprint")
+        if tuya_fingerprint:
+            lines.append(
+                (
+                    "- Tuya fingerprint: "
+                    f"schema={tuya_fingerprint.get('has_tuya_schema_evidence')}, "
+                    "charging-plan schema="
+                    f"{tuya_fingerprint.get('has_charging_plan_schema_evidence')}, "
+                    f"probe results={tuya_fingerprint.get('tuya_probe_count', 0)}"
                 )
             )
 
@@ -820,6 +1051,107 @@ class JackeryDiagnosticsClient:
                 )
         return probes
 
+    def _tuya_path_identifier_values(
+        self, device: dict[str, Any]
+    ) -> dict[str, str | int | None]:
+        raw = device.get("raw", {})
+        return {
+            "device_id": device.get("id"),
+            "device_sn": device.get("device_sn"),
+            "device_code": _device_value(raw, "deviceCode", "device_code"),
+        }
+
+    def _probe_tuya_path(
+        self,
+        device: dict[str, Any],
+        endpoint_template: str,
+        identifier_name: str,
+        identifier_value: str | int,
+    ) -> dict[str, Any]:
+        """Run one read-only Tuya-style path probe."""
+        rendered_endpoint = endpoint_template.replace(
+            "{" + identifier_name + "}",
+            quote(str(identifier_value), safe=""),
+        )
+        try:
+            response = self._get_with_header_profile(
+                rendered_endpoint,
+                {},
+                "android_apk_1_0_7",
+            )
+            body = response.text
+            interesting = is_interesting_response(response.status_code, body)
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "probe_family": "tuya_path",
+                "header_profile": "android_apk_1_0_7",
+                "parameter_name": identifier_name,
+                "parameter_value": str(identifier_value),
+                "http_status": response.status_code,
+                "body": body,
+                "body_hash": _response_hash(body),
+                "interesting": interesting,
+                "error": False,
+            }
+        except JackeryDiagnosticsError as err:
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "probe_family": "tuya_path",
+                "header_profile": "android_apk_1_0_7",
+                "parameter_name": identifier_name,
+                "parameter_value": str(identifier_value),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unexpected Tuya path probe error for %s via %s=%s on %s",
+                device["name"],
+                identifier_name,
+                identifier_value,
+                endpoint_template,
+            )
+            return {
+                "method": "GET",
+                "endpoint": endpoint_template,
+                "probe_family": "tuya_path",
+                "header_profile": "android_apk_1_0_7",
+                "parameter_name": identifier_name,
+                "parameter_value": str(identifier_value),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+
+    def _collect_tuya_path_probes(
+        self, device: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Run read-only probes against Tuya OpenAPI-shaped paths."""
+        probes: list[dict[str, Any]] = []
+        identifier_values = self._tuya_path_identifier_values(device)
+        for endpoint in TUYA_PATH_PROBE_ENDPOINTS:
+            for identifier_name, identifier_value in identifier_values.items():
+                if "{" + identifier_name + "}" not in endpoint:
+                    continue
+                if identifier_value in (None, ""):
+                    continue
+                probes.append(
+                    self._probe_tuya_path(
+                        device,
+                        endpoint,
+                        identifier_name,
+                        identifier_value,
+                    )
+                )
+        return probes
+
     def _supported_socketry_settings(
         self,
         properties: dict[str, Any],
@@ -921,8 +1253,10 @@ class JackeryDiagnosticsClient:
         probes: list[dict[str, Any]],
         property_snapshots: list[dict[str, Any]],
         extended_probes: list[dict[str, Any]],
+        tuya_probes: list[dict[str, Any]],
         socketry_metadata: dict[str, Any],
         mqtt_capture: dict[str, Any],
+        tuya_fingerprint: dict[str, Any],
     ) -> dict[str, Any]:
         """Summarize evidence for the three charging-plan entities."""
         property_keys_by_profile = {
@@ -935,7 +1269,7 @@ class JackeryDiagnosticsClient:
         for keys in property_keys_by_profile.values():
             all_property_keys.update(keys)
 
-        all_probes = [*probes, *extended_probes]
+        all_probes = [*probes, *extended_probes, *tuya_probes]
         candidate_probes = [
             {
                 "endpoint": probe.get("endpoint"),
@@ -1011,6 +1345,19 @@ class JackeryDiagnosticsClient:
             "candidate_probes": candidate_probes[:25],
             "mqtt_message_count": len(mqtt_messages),
             "mqtt_candidate_messages": mqtt_candidate_messages[:25],
+            "tuya_fingerprint_summary": {
+                "has_tuya_schema_evidence": tuya_fingerprint.get(
+                    "has_tuya_schema_evidence"
+                ),
+                "has_charging_plan_schema_evidence": tuya_fingerprint.get(
+                    "has_charging_plan_schema_evidence"
+                ),
+                "detected_fields": tuya_fingerprint.get("detected_fields", []),
+                "detected_charging_plan_terms": tuya_fingerprint.get(
+                    "detected_charging_plan_terms", []
+                ),
+                "tuya_probe_count": tuya_fingerprint.get("tuya_probe_count", 0),
+            },
             "diagnosis_hint": (
                 "If 107 and 108 are false everywhere and Socketry has no "
                 "charging-plan entries, the main integration needs a different "
@@ -1055,8 +1402,14 @@ class JackeryDiagnosticsClient:
                     snapshot_properties = snapshot["properties"]
                     break
             extended_probes = self._collect_extended_probes(device)
+            tuya_probes = self._collect_tuya_path_probes(device)
             socketry_metadata = self._supported_socketry_settings(
                 snapshot_properties
+            )
+            tuya_fingerprint = build_tuya_fingerprint(
+                device,
+                [*probes, *extended_probes, *tuya_probes],
+                property_snapshots,
             )
 
             device_results.append(
@@ -1068,14 +1421,18 @@ class JackeryDiagnosticsClient:
                     "probes": probes,
                     "property_snapshots": property_snapshots,
                     "extended_probes": extended_probes,
+                    "tuya_probes": tuya_probes,
+                    "tuya_fingerprint": tuya_fingerprint,
                     "socketry_device_metadata": socketry_metadata,
                     "charging_plan_analysis": self._build_charging_plan_analysis(
                         device,
                         probes,
                         property_snapshots,
                         extended_probes,
+                        tuya_probes,
                         socketry_metadata,
                         mqtt_capture,
+                        tuya_fingerprint,
                     ),
                 }
             )

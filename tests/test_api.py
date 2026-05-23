@@ -40,6 +40,9 @@ from custom_components.jackery_diagnostics.const import (
     EXTENDED_PROBE_ENDPOINTS,
     PROPERTY_SNAPSHOT_PROFILES,
     PROBE_ENDPOINTS,
+    READ_ONLY_POST_BODY_FORMATS,
+    READ_ONLY_POST_IDENTIFIER_NAMES,
+    READ_ONLY_POST_PROBE_ENDPOINTS,
     TUYA_PATH_PROBE_ENDPOINTS,
 )
 
@@ -59,6 +62,18 @@ def _read_only_probe_count(*, has_device_code: bool = False) -> int:
         + snapshot_count
         + (len(EXTENDED_PROBE_ENDPOINTS) * identifier_count)
         + tuya_path_count
+    )
+
+
+def _read_only_post_count(*, has_device_code: bool = False) -> int:
+    """Return the number of read-only POST probe responses needed after login."""
+    identifier_count = len(READ_ONLY_POST_IDENTIFIER_NAMES)
+    if not has_device_code:
+        identifier_count -= 1
+    return (
+        len(READ_ONLY_POST_PROBE_ENDPOINTS)
+        * identifier_count
+        * len(READ_ONLY_POST_BODY_FORMATS)
     )
 
 
@@ -123,7 +138,13 @@ class LoginAndProbeTests(unittest.TestCase):
     def test_run_probe_scans_every_endpoint_for_both_identifiers(
         self, mock_post: Mock, mock_get: Mock
     ) -> None:
-        mock_post.return_value = Mock(status_code=200, text='{"code":0,"token":"abc"}')
+        mock_post.side_effect = [
+            Mock(status_code=200, text='{"code":0,"token":"abc"}'),
+            *[
+                Mock(status_code=404, text='{"code":404,"msg":"not found"}')
+                for _ in range(_read_only_post_count())
+            ],
+        ]
         mock_get.side_effect = [
             Mock(
                 status_code=200,
@@ -153,6 +174,15 @@ class LoginAndProbeTests(unittest.TestCase):
             len(EXTENDED_PROBE_ENDPOINTS) * (len(EXTENDED_IDENTIFIER_NAMES) - 1),
         )
         self.assertEqual(
+            len(result["devices"][0]["post_read_probes"]),
+            _read_only_post_count(),
+        )
+        post_probe = result["devices"][0]["post_read_probes"][0]
+        self.assertEqual(post_probe["method"], "POST")
+        self.assertEqual(post_probe["probe_family"], "post_read")
+        self.assertEqual(post_probe["request_body"], {"deviceId": 123})
+        self.assertIn(post_probe["body_format"], READ_ONLY_POST_BODY_FORMATS)
+        self.assertEqual(
             len(result["devices"][0]["tuya_probes"]),
             len(TUYA_PATH_PROBE_ENDPOINTS) - 1,
         )
@@ -168,7 +198,13 @@ class LoginAndProbeTests(unittest.TestCase):
     def test_run_probe_accepts_jackery_app_device_keys(
         self, mock_post: Mock, mock_get: Mock
     ) -> None:
-        mock_post.return_value = Mock(status_code=200, text='{"code":0,"token":"abc"}')
+        mock_post.side_effect = [
+            Mock(status_code=200, text='{"code":0,"token":"abc"}'),
+            *[
+                Mock(status_code=404, text='{"code":404,"msg":"not found"}')
+                for _ in range(_read_only_post_count())
+            ],
+        ]
         mock_get.side_effect = [
             Mock(
                 status_code=200,
@@ -195,7 +231,13 @@ class LoginAndProbeTests(unittest.TestCase):
     def test_run_probe_records_request_errors_without_crashing(
         self, mock_post: Mock, mock_get: Mock
     ) -> None:
-        mock_post.return_value = Mock(status_code=200, text='{"code":0,"token":"abc"}')
+        mock_post.side_effect = [
+            Mock(status_code=200, text='{"code":0,"token":"abc"}'),
+            *[
+                Mock(status_code=404, text='{"code":404}')
+                for _ in range(_read_only_post_count())
+            ],
+        ]
         mock_get.side_effect = [
             Mock(
                 status_code=200,

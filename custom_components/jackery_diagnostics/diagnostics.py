@@ -16,19 +16,24 @@ TO_REDACT = {
     "appUserName",
     "bluetoothKey",
     "deviceCode",
+    "deviceId",
     "device_id",
     "device_sn",
     "deviceSn",
     "devId",
     "devSn",
     "email",
+    "id",
+    "localKey",
     "macId",
     "mqttPassWord",
     "nickname",
     "password",
     "sn",
     "token",
+    "uid",
     "userId",
+    "uuid",
 }
 REDACTED = "**REDACTED**"
 SENSITIVE_PARAMETER_NAMES = {
@@ -224,8 +229,14 @@ def _scope_device(device: dict[str, Any]) -> dict[str, Any]:
             for probe in [
                 *device.get("probes", []),
                 *device.get("extended_probes", []),
+                *device.get("post_read_probes", []),
             ]
             if isinstance(probe, dict) and probe.get("interesting")
+        ],
+        "post_read_probes": [
+            _scope_probe(probe)
+            for probe in device.get("post_read_probes", [])
+            if isinstance(probe, dict)
         ],
         "tuya_probes": [
             _scope_probe(probe)
@@ -268,9 +279,13 @@ def _scope_probe(probe: dict[str, Any]) -> dict[str, Any]:
     return {
         "method": probe.get("method", "GET"),
         "endpoint": probe.get("endpoint"),
+        "probe_family": probe.get("probe_family"),
         "header_profile": probe.get("header_profile"),
+        "body_format": probe.get("body_format"),
         "parameter_name": probe.get("parameter_name"),
         "parameter_value": probe.get("parameter_value"),
+        "request_body": probe.get("request_body"),
+        "request_body_hash": probe.get("request_body_hash"),
         "http_status": probe.get("http_status"),
         "body_hash": probe.get("body_hash"),
         "body": probe.get("body"),
@@ -287,7 +302,10 @@ def _redact_nested(value: Any) -> Any:
         )
         redacted: dict[str, Any] = {}
         for key, item in value.items():
-            if key == "parameter_value" and sensitive_parameter:
+            normalized_key = str(key).replace("_", "").lower()
+            if normalized_key in SENSITIVE_PARAMETER_NAMES:
+                redacted[key] = REDACTED
+            elif key == "parameter_value" and sensitive_parameter:
                 redacted[key] = REDACTED
             elif (
                 key == "value_preview"

@@ -209,6 +209,20 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                                         ),
                                     }
                                 ],
+                                "post_read_probes": [
+                                    {
+                                        "method": "POST",
+                                        "endpoint": "/v1/device/chargePlan/list",
+                                        "probe_family": "post_read",
+                                        "body_format": "json",
+                                        "parameter_name": "deviceId",
+                                        "parameter_value": 123,
+                                        "request_body": {"deviceId": 123},
+                                        "body": json.dumps(
+                                            {"data": {"deviceId": 123}}
+                                        ),
+                                    }
+                                ],
                                 "tuya_probes": [
                                     {
                                         "endpoint": "/v1.0/devices/{device_id}/status",
@@ -244,6 +258,14 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             device["tuya_probes"][0]["parameter_value"],
+            "**REDACTED**",
+        )
+        self.assertEqual(
+            device["post_read_probes"][0]["parameter_value"],
+            "**REDACTED**",
+        )
+        self.assertEqual(
+            device["post_read_probes"][0]["request_body"]["deviceId"],
             "**REDACTED**",
         )
         probe = device["interesting_probes"][0]

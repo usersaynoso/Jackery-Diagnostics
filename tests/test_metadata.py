@@ -38,7 +38,7 @@ class MetadataTests(unittest.TestCase):
             self.manifest["requirements"],
             ["pycryptodomex>=3.9.0", "socketry>=0.2.4"],
         )
-        self.assertEqual(self.manifest["version"], "1.4")
+        self.assertEqual(self.manifest["version"], "1.5")
         self.assertEqual(self.manifest["iot_class"], "cloud_polling")
         self.assertTrue(self.manifest["config_flow"])
 
@@ -56,6 +56,7 @@ class MetadataTests(unittest.TestCase):
         self.assertIn("previous_result_diff", self.readme)
         self.assertIn("charging_plan_analysis", self.readme)
         self.assertIn("tuya_fingerprint", self.readme)
+        self.assertIn("read-only `POST`", self.readme)
         self.assertIn("Socketry", self.readme)
 
     def test_english_translations_match_source_strings(self) -> None:

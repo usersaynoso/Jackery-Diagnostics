@@ -8,6 +8,7 @@ The integration:
 - discovers devices bound to the account
 - probes a fixed list of undocumented endpoints with both `deviceId` and `deviceSn`
 - probes an extended set of charging-plan candidates with Android APK-style headers
+- probes safe read-only `POST` list/detail/status/schema candidates because mobile apps often use `POST` for screen reads
 - probes Tuya-shaped read-only status, function, schema, and specification paths in case Jackery is fronting a Tuya/OEM backend
 - captures structured `/v1/device/property` snapshots
 - passively listens to Socketry MQTT property updates for 30 seconds without sending commands
@@ -51,6 +52,7 @@ The credentials are used only to authenticate with the Jackery cloud and run the
 - `previous_result_diff` after the second and later runs
 - `socketry_protocol_catalog` with known writable property IDs, action IDs, value labels, and MQTT command payload shape
 - `socketry_mqtt_capture` with passive property messages observed during the diagnostic window
+- `post_read_probes` per device, covering safe read-only `POST` candidates with form and JSON request bodies
 - `tuya_fingerprint` per device, including Tuya-like schema/status/function/datapoint field hits and any charging-plan terms found in read-only responses
 - `tuya_probes` per device, covering Jackery-hosted paths shaped like Tuya OpenAPI status/function/specification calls
 - `charging_plan_analysis` per device, including direct evidence for keys `107` and `108`
@@ -58,7 +60,7 @@ The credentials are used only to authenticate with the Jackery cloud and run the
 
 ## Tuya/OEM backend checks
 
-Some Jackery app behavior appears Tuya-like. Version 1.4 adds read-only checks for that route. The probe searches discovery data, property snapshots, extended endpoint responses, and Tuya-shaped path responses for fields such as `productKey`, `productId`, `category`, `functions`, `status`, `schema`, `dps`, `dpId`, `localKey`, and charging-plan terms such as `charge_plan`, `schedule`, `timer`, `107`, and `108`.
+Some Jackery app behavior appears Tuya-like. The probe searches discovery data, property snapshots, extended endpoint responses, safe read-only `POST` responses, and Tuya-shaped path responses for fields such as `productKey`, `productId`, `category`, `functions`, `status`, `schema`, `dps`, `dpId`, `localKey`, and charging-plan terms such as `charge_plan`, `schedule`, `timer`, `107`, and `108`.
 
 Useful results will appear in each device's `tuya_fingerprint` section. If `has_tuya_schema_evidence` and `has_charging_plan_schema_evidence` are both false, the Jackery cloud path available to Home Assistant still has not exposed the read/write schema needed for the three charging-plan entities.
 

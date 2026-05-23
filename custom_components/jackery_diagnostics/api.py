@@ -31,6 +31,9 @@ from .const import (
     MQTT_CAPTURE_SECONDS,
     PROPERTY_SNAPSHOT_PROFILES,
     PROBE_ENDPOINTS,
+    READ_ONLY_POST_BODY_FORMATS,
+    READ_ONLY_POST_IDENTIFIER_NAMES,
+    READ_ONLY_POST_PROBE_ENDPOINTS,
     REQUEST_TIMEOUT,
     RSA_PUBLIC_KEY,
     TUYA_CHARGING_PLAN_TERMS,
@@ -126,6 +129,19 @@ def _build_token_headers(
     return headers
 
 
+def _build_post_headers(
+    token: str,
+    profile_name: str,
+    body_format: str,
+) -> dict[str, str]:
+    headers = _build_token_headers(token, profile_name)
+    if body_format == "json":
+        headers["Content-Type"] = "application/json"
+    else:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    return headers
+
+
 def _parse_json(text: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(text)
@@ -212,6 +228,12 @@ def _extract_property_map(body: str) -> dict[str, Any] | None:
 def _response_hash(body: str) -> str:
     """Return a stable short hash for comparing full probe bodies."""
     return hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _hash_jsonable(value: Any) -> str:
+    """Return a stable short hash for request payload shape comparisons."""
+    body = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
+    return _response_hash(body)
 
 
 def _setting_to_dict(setting: Any) -> dict[str, Any]:
@@ -672,6 +694,11 @@ def format_probe_notification(results: dict[str, Any]) -> str:
                 shown += 1
                 if shown >= 5:
                     break
+        post_interesting = _interesting_probe_count(device, "post_read_probes")
+        if post_interesting:
+            lines.append(
+                f"- Read-only POST probes: {post_interesting} interesting response(s)"
+            )
         analysis = device.get("charging_plan_analysis")
         if analysis:
             expected = analysis.get("main_integration_expected_entities", {})
@@ -785,6 +812,50 @@ class JackeryDiagnosticsClient:
                 endpoint,
                 params,
                 header_profile,
+                retry=False,
+            )
+
+        return response
+
+    def _post_with_header_profile(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        header_profile: str,
+        body_format: str,
+        *,
+        retry: bool = True,
+    ):
+        if not self._token:
+            self.login()
+
+        assert self._token is not None
+        headers = _build_post_headers(self._token, header_profile, body_format)
+        request_kwargs: dict[str, Any] = {
+            "headers": headers,
+            "timeout": REQUEST_TIMEOUT,
+        }
+        if body_format == "json":
+            request_kwargs["json"] = payload
+        else:
+            request_kwargs["data"] = payload
+
+        try:
+            response = requests.post(
+                f"{BASE_URL}{endpoint}",
+                **request_kwargs,
+            )
+        except requests.RequestException as err:
+            raise JackeryConnectionError(str(err)) from err
+
+        response_payload = _parse_json(response.text)
+        if retry and response_payload is not None and response_payload.get("code") == 10402:
+            self.login()
+            return self._post_with_header_profile(
+                endpoint,
+                payload,
+                header_profile,
+                body_format,
                 retry=False,
             )
 
@@ -992,6 +1063,25 @@ class JackeryDiagnosticsClient:
                 identifiers.append((name, value))
         return identifiers
 
+    def _post_identifier_values(
+        self, device: dict[str, Any]
+    ) -> list[tuple[str, str | int]]:
+        """Return identifier payloads for safe read-only POST probes."""
+        raw = device.get("raw", {})
+        values: dict[str, Any] = {
+            "deviceId": device.get("id"),
+            "devId": device.get("id"),
+            "deviceSn": device.get("device_sn"),
+            "devSn": device.get("device_sn"),
+            "deviceCode": _device_value(raw, "deviceCode", "device_code"),
+        }
+        identifiers: list[tuple[str, str | int]] = []
+        for name in READ_ONLY_POST_IDENTIFIER_NAMES:
+            value = values.get(name)
+            if value not in (None, ""):
+                identifiers.append((name, value))
+        return identifiers
+
     def _collect_property_snapshots(
         self, device: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -1049,6 +1139,107 @@ class JackeryDiagnosticsClient:
                         "android_apk_1_0_7",
                     )
                 )
+        return probes
+
+    def _probe_single_post_read(
+        self,
+        device: dict[str, Any],
+        endpoint: str,
+        payload: dict[str, Any],
+        parameter_name: str,
+        parameter_value: str | int,
+        header_profile: str,
+        body_format: str,
+    ) -> dict[str, Any]:
+        """Run one safe read-only POST probe with a device identifier body."""
+        try:
+            response = self._post_with_header_profile(
+                endpoint,
+                payload,
+                header_profile,
+                body_format,
+            )
+            body = response.text
+            interesting = is_interesting_response(response.status_code, body)
+            return {
+                "method": "POST",
+                "endpoint": endpoint,
+                "probe_family": "post_read",
+                "header_profile": header_profile,
+                "body_format": body_format,
+                "parameter_name": parameter_name,
+                "parameter_value": str(parameter_value),
+                "request_body": dict(payload),
+                "request_body_hash": _hash_jsonable(payload),
+                "http_status": response.status_code,
+                "body": body,
+                "body_hash": _response_hash(body),
+                "interesting": interesting,
+                "error": False,
+            }
+        except JackeryDiagnosticsError as err:
+            return {
+                "method": "POST",
+                "endpoint": endpoint,
+                "probe_family": "post_read",
+                "header_profile": header_profile,
+                "body_format": body_format,
+                "parameter_name": parameter_name,
+                "parameter_value": str(parameter_value),
+                "request_body": dict(payload),
+                "request_body_hash": _hash_jsonable(payload),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.exception(
+                "Unexpected read-only POST probe error for %s via %s=%s on %s",
+                device["name"],
+                parameter_name,
+                parameter_value,
+                endpoint,
+            )
+            return {
+                "method": "POST",
+                "endpoint": endpoint,
+                "probe_family": "post_read",
+                "header_profile": header_profile,
+                "body_format": body_format,
+                "parameter_name": parameter_name,
+                "parameter_value": str(parameter_value),
+                "request_body": dict(payload),
+                "request_body_hash": _hash_jsonable(payload),
+                "http_status": "ERROR",
+                "body": str(err),
+                "body_hash": _response_hash(str(err)),
+                "interesting": False,
+                "error": True,
+            }
+
+    def _collect_post_read_probes(
+        self, device: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Probe read-like mobile endpoints that may require POST bodies."""
+        probes: list[dict[str, Any]] = []
+        identifiers = self._post_identifier_values(device)
+        for endpoint in READ_ONLY_POST_PROBE_ENDPOINTS:
+            for parameter_name, parameter_value in identifiers:
+                payload = {parameter_name: parameter_value}
+                for body_format in READ_ONLY_POST_BODY_FORMATS:
+                    probes.append(
+                        self._probe_single_post_read(
+                            device,
+                            endpoint,
+                            payload,
+                            parameter_name,
+                            parameter_value,
+                            "android_apk_1_0_7",
+                            body_format,
+                        )
+                    )
         return probes
 
     def _tuya_path_identifier_values(
@@ -1253,6 +1444,7 @@ class JackeryDiagnosticsClient:
         probes: list[dict[str, Any]],
         property_snapshots: list[dict[str, Any]],
         extended_probes: list[dict[str, Any]],
+        post_read_probes: list[dict[str, Any]],
         tuya_probes: list[dict[str, Any]],
         socketry_metadata: dict[str, Any],
         mqtt_capture: dict[str, Any],
@@ -1269,13 +1461,16 @@ class JackeryDiagnosticsClient:
         for keys in property_keys_by_profile.values():
             all_property_keys.update(keys)
 
-        all_probes = [*probes, *extended_probes, *tuya_probes]
+        all_probes = [*probes, *extended_probes, *post_read_probes, *tuya_probes]
         candidate_probes = [
             {
+                "method": probe.get("method", "GET"),
                 "endpoint": probe.get("endpoint"),
                 "header_profile": probe.get("header_profile", "ios_app_1_0_5"),
+                "body_format": probe.get("body_format"),
                 "parameter_name": probe.get("parameter_name"),
                 "parameter_value": probe.get("parameter_value"),
+                "request_body_hash": probe.get("request_body_hash"),
                 "http_status": probe.get("http_status"),
                 "body_hash": probe.get("body_hash")
                 or _response_hash(str(probe.get("body", ""))),
@@ -1343,6 +1538,10 @@ class JackeryDiagnosticsClient:
             "socketry_charging_plan_entries": socketry_charging_entries,
             "candidate_probe_count": len(candidate_probes),
             "candidate_probes": candidate_probes[:25],
+            "post_read_probe_count": len(post_read_probes),
+            "post_read_interesting_count": _interesting_probe_count(
+                {"post_read_probes": post_read_probes}, "post_read_probes"
+            ),
             "mqtt_message_count": len(mqtt_messages),
             "mqtt_candidate_messages": mqtt_candidate_messages[:25],
             "tuya_fingerprint_summary": {
@@ -1402,13 +1601,14 @@ class JackeryDiagnosticsClient:
                     snapshot_properties = snapshot["properties"]
                     break
             extended_probes = self._collect_extended_probes(device)
+            post_read_probes = self._collect_post_read_probes(device)
             tuya_probes = self._collect_tuya_path_probes(device)
             socketry_metadata = self._supported_socketry_settings(
                 snapshot_properties
             )
             tuya_fingerprint = build_tuya_fingerprint(
                 device,
-                [*probes, *extended_probes, *tuya_probes],
+                [*probes, *extended_probes, *post_read_probes, *tuya_probes],
                 property_snapshots,
             )
 
@@ -1421,6 +1621,7 @@ class JackeryDiagnosticsClient:
                     "probes": probes,
                     "property_snapshots": property_snapshots,
                     "extended_probes": extended_probes,
+                    "post_read_probes": post_read_probes,
                     "tuya_probes": tuya_probes,
                     "tuya_fingerprint": tuya_fingerprint,
                     "socketry_device_metadata": socketry_metadata,
@@ -1429,6 +1630,7 @@ class JackeryDiagnosticsClient:
                         probes,
                         property_snapshots,
                         extended_probes,
+                        post_read_probes,
                         tuya_probes,
                         socketry_metadata,
                         mqtt_capture,

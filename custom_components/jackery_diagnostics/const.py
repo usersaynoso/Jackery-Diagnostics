@@ -112,6 +112,29 @@ EXTENDED_PROBE_ENDPOINTS = (
     "/v1/device/instruction",
     "/v1/device/instructions",
 )
+READ_ONLY_POST_IDENTIFIER_NAMES = (
+    "deviceId",
+    "devId",
+    "deviceSn",
+    "devSn",
+    "deviceCode",
+)
+READ_ONLY_POST_BODY_FORMATS = ("form", "json")
+READ_ONLY_POST_PROBE_ENDPOINTS = (
+    "/v1/device/chargePlan",
+    "/v1/device/chargePlan/detail",
+    "/v1/device/chargePlan/list",
+    "/v1/device/charge_plan",
+    "/v1/device/charge/plan",
+    "/v1/device/schedule",
+    "/v1/device/timePlan",
+    "/v1/device/time_plan",
+    "/v1/device/timing/list",
+    "/v1/device/function/list",
+    "/v1/device/schema",
+    "/v1/device/specification",
+    "/v1/device/status",
+)
 TUYA_PATH_PROBE_ENDPOINTS = (
     "/v1.0/devices/{device_id}/status",
     "/v1.0/devices/{device_id}/functions",
